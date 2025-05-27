@@ -1,4 +1,4 @@
-module github.com/rohfle/go-nicehttpclient
+module github.com/rohfle/nicehttp
 
 go 1.20
 

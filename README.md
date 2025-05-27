@@ -1,6 +1,49 @@
-# go-nicehttpclient
+# nicehttp
 
-A nice HTTP client with rate limit, backup and max retries. Respects 429 Retry-After header.
+A nice HTTP client written in golang with rate limit, backup and max retries. Respects 429 Retry-After header.
+
+## Usage
+
+```go
+package main
+
+import (
+    "fmt"
+    "io"
+	"net/http"
+
+    "github.com/rohfle/nicehttp"
+)
+
+func main() {
+    headers := make(http.Header)
+    headers.Set("User-Agent", "your-user-agent-here/0.1")
+
+	settings := &nicehttp.Settings{
+		DefaultHeaders: headers,
+		RequestInterval: 1 * time.Second,
+		Backoff:         1 * time.Second,
+		MaxBackoff:      120 * time.Second,
+		MaxTries:        10,
+		MaxConnsPerHost: 1,
+	}
+
+	client := nicehttp.NewClient(settings)
+
+	resp, err := client.Get(server.URL)
+	if err != nil {
+		fmt.Println("error:", err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Println("error:", err)
+	}
+	fmt.Println("got resp:", string(data))
+	// Output: got resp: hello world
+}
+
+```
 
 ## License
 
