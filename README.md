@@ -2,6 +2,10 @@
 
 A nice HTTP client written in golang with rate limit, backup and max retries. Respects 429 Retry-After header.
 
+[![Go Report Card](https://goreportcard.com/badge/github.com/rohfle/nicehttp)](https://goreportcard.com/report/github.com/rohfle/nicehttp)
+[![Test](https://github.com/rohfle/nicehttp/actions/workflows/test.yml/badge.svg)](https://github.com/rohfle/nicehttp/actions/workflows/test.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/rohfle/nicehttp.svg)](https://pkg.go.dev/github.com/rohfle/nicehttp)
+
 ## Usage
 
 ```go
