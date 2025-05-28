@@ -140,7 +140,7 @@ func TestRoundTripperFirstRun(t *testing.T) {
 		},
 	}
 
-	var client *http.Client = createClientWithEndpoint(&settings, endpoint)
+	client := createClientWithEndpoint(&settings, endpoint)
 
 	endpoint.Deadline = time.Now().UTC().Add(deadlineDuration)
 
@@ -213,7 +213,7 @@ func TestRoundTripperSecondRun(t *testing.T) {
 		},
 	}
 
-	var client *http.Client = createClientWithEndpoint(&settings, endpoint)
+	client := createClientWithEndpoint(&settings, endpoint)
 
 	endpoint.Deadline = time.Now().UTC().Add(deadlineDuration)
 
@@ -281,7 +281,7 @@ func TestRoundTripperThirdRun(t *testing.T) {
 		},
 	}
 
-	var client *http.Client = createClientWithEndpoint(&settings, endpoint)
+	client := createClientWithEndpoint(&settings, endpoint)
 
 	endpoint.Deadline = time.Now().UTC().Add(deadlineDuration)
 
@@ -348,7 +348,7 @@ func TestRoundTripperFourthRun(t *testing.T) {
 		},
 	}
 
-	var client *http.Client = createClientWithEndpoint(&settings, endpoint)
+	client := createClientWithEndpoint(&settings, endpoint)
 
 	endpoint.Deadline = time.Now().UTC().Add(deadlineDuration)
 
@@ -408,7 +408,7 @@ func TestRoundTripperMultithread(t *testing.T) {
 		},
 	}
 
-	var client *http.Client = createClientWithEndpoint(&settings, endpoint)
+	client := createClientWithEndpoint(&settings, endpoint)
 
 	var wg sync.WaitGroup
 
@@ -452,7 +452,7 @@ func TestRoundTripperDefaults(t *testing.T) {
 		},
 	}
 
-	var client *http.Client = createClientWithEndpoint(nil, endpoint)
+	client := createClientWithEndpoint(nil, endpoint)
 	resp, err := client.Get("http://example.com")
 	if err != nil {
 		t.Fatal("expected 200 response, got unexpected error", err)
@@ -504,7 +504,7 @@ func TestRoundTripperRetryAfterSeconds(t *testing.T) {
 		MaxBackoff:      1 * time.Millisecond,
 	}
 
-	var client *http.Client = createClientWithEndpoint(settings, endpoint)
+	client := createClientWithEndpoint(settings, endpoint)
 	resp, err := client.Get("http://example.com")
 	if err != nil {
 		t.Fatal("expected 200 response, got unexpected error", err)
