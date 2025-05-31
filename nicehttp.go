@@ -13,7 +13,7 @@ import (
 	"golang.org/x/time/rate"
 )
 
-const DefaultUserAgent = "nicehttp/0.1"
+const DefaultUserAgent = "nicehttp/0.1.1"
 
 type readSeekCloser struct {
 	*bytes.Reader
