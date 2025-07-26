@@ -7,13 +7,35 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"runtime/debug"
 	"strconv"
 	"time"
 
 	"golang.org/x/time/rate"
 )
 
-const DefaultUserAgent = "nicehttp/0.1.1"
+func getVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+
+	for _, mod := range info.Deps {
+		if mod.Path != "github.com/rohfle/nicehttp" {
+			continue
+		}
+		if mod.Replace != nil {
+			mod = mod.Replace
+		}
+		if mod.Version != "" && mod.Version != "(devel)" {
+			return mod.Version
+		}
+	}
+
+	return "unknown"
+}
+
+var DefaultUserAgent = fmt.Sprintf("nicehttp/%s", getVersion())
 
 type readSeekCloser struct {
 	*bytes.Reader
