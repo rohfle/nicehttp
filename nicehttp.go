@@ -28,12 +28,6 @@ func newReadSeekCloser(b []byte) io.ReadSeekCloser {
 	return readSeekCloser{bytes.NewReader(b)}
 }
 
-type ReadSeekCloser interface {
-	io.Reader
-	io.Seeker
-	io.Closer
-}
-
 type Settings struct {
 	// Headers added to every request
 	// Include headers like "User-Agent" and "Authorization" here
@@ -153,11 +147,11 @@ func (rt *niceRoundTripper) RoundTrip(origReq *http.Request) (*http.Response, er
 	backoff := rt.backoff
 
 	// in order to retry requests, we need io.Seeker to support rewinding the body
-	var bodySeeker ReadSeekCloser = nil
+	var bodySeeker io.ReadSeekCloser = nil
 	// the body might be nil for some methods (eg GET / HEAD)
 	if origReq.Body != nil {
 		var hasSeek bool
-		bodySeeker, hasSeek = origReq.Body.(ReadSeekCloser)
+		bodySeeker, hasSeek = origReq.Body.(io.ReadSeekCloser)
 		if hasSeek {
 			// The body is seekable so we can stream the original
 			// Defer the close of the original request body
