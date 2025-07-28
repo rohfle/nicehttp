@@ -222,8 +222,11 @@ func (rt *niceRoundTripper) RoundTrip(origReq *http.Request) (*http.Response, er
 				if len(values) == 0 {
 					continue
 				}
+				if len(req.Header[key]) > 0 {
+					// Header already exists with at least one value, do not replace with defaults
+					continue
+				}
 				// Support header keys with multiple values
-				req.Header.Del(key)
 				for _, val := range values {
 					req.Header.Add(key, val)
 				}
