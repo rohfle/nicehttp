@@ -66,9 +66,9 @@ type Settings struct {
 	MaxTries int
 	// Maximum number of connections per host
 	MaxConnsPerHost int
-	// transport allows override of downstream roundtripper for testing purposes
+	// Transport allows override of downstream roundtripper
 	// Not specifying a value means http.DefaultTransport will be used
-	transport http.RoundTripper
+	Transport http.RoundTripper
 }
 
 // NewClient creates a nice HTTP client that features rate limit, backoff and max retries
@@ -113,18 +113,14 @@ func NewClient(settings *Settings) *http.Client {
 
 	limiter := rate.NewLimiter(rate.Every(requestInterval), 1)
 
-	downstreamRoundTripper := settings.transport
-	if downstreamRoundTripper == nil {
-		downstreamRoundTripper = http.DefaultTransport.(*http.Transport).Clone()
-	}
-
-	if transport, ok := downstreamRoundTripper.(*http.Transport); ok {
-		transport.MaxConnsPerHost = maxConnsPerHost
+	downstreamTransport := settings.Transport
+	if downstreamTransport == nil {
+		downstreamTransport = http.DefaultTransport.(*http.Transport).Clone()
 	}
 
 	return &http.Client{
 		Transport: &niceRoundTripper{
-			roundTripper:   downstreamRoundTripper,
+			roundTripper:   downstreamTransport,
 			limiter:        limiter,
 			defaultHeaders: defaultHeaders,
 			backoff:        backoff,
@@ -283,10 +279,7 @@ func (rt *niceRoundTripper) RoundTrip(origReq *http.Request) (*http.Response, er
 			}
 
 			// Double backoff each retry
-			backoff = backoff * 2
-			if backoff > rt.maxBackoff {
-				backoff = rt.maxBackoff
-			}
+			backoff = min(backoff*2, rt.maxBackoff)
 			// And try again!
 			continue
 		}

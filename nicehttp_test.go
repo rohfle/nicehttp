@@ -84,7 +84,7 @@ func createClientWithEndpoint(settings *Settings, endpoint *MockEndpoint) *http.
 	if settings == nil {
 		settings = &Settings{}
 	}
-	settings.transport = &MockTransport{
+	settings.Transport = &MockTransport{
 		Endpoint: endpoint,
 	}
 	return NewClient(settings)
@@ -243,7 +243,6 @@ func TestRoundTripperSecondRun(t *testing.T) {
 }
 
 func TestRoundTripperThirdRun(t *testing.T) {
-
 	// deadline around 0.5 * RequestInterval
 	// if err = rt.limiter.Wait(req.Context()); err != nil {
 	// 	return nil, err
@@ -374,7 +373,6 @@ func TestRoundTripperFourthRun(t *testing.T) {
 }
 
 func TestRoundTripperMultithread(t *testing.T) {
-
 	settings := Settings{
 		RequestInterval: 10 * time.Millisecond,
 		Backoff:         10 * time.Millisecond,
