@@ -28,13 +28,13 @@ func NewNiceTransportBuilder() *NiceTransportBuilder {
 
 // Chained setters
 func (b *NiceTransportBuilder) Set(settings *NiceTransport) *NiceTransportBuilder {
-	b.SetDefaultHeaders(settings.DefaultHeaders)
-	b.SetBackoff(settings.Backoff, settings.MaxBackoff)
-	b.SetMaxTries(settings.MaxTries)
-	b.SetDownstreamTransport(settings.DownstreamTransport)
+	b.SetDefaultHeaders(settings.defaultHeaders)
+	b.SetBackoff(settings.backoff, settings.maxBackoff)
+	b.SetMaxTries(settings.maxTries)
+	b.SetDownstreamTransport(settings.downstreamTransport)
 	b.rateLimiter = nil
-	if settings.RateLimiter != nil {
-		rl := settings.RateLimiter
+	if settings.rateLimiter != nil {
+		rl := settings.rateLimiter
 		b.rateLimiter = rate.NewLimiter(rl.Limit(), rl.Burst())
 	}
 	return b
@@ -61,6 +61,11 @@ func (b *NiceTransportBuilder) SetUserAgent(ua string) *NiceTransportBuilder {
 func (b *NiceTransportBuilder) SetRateLimit(interval time.Duration, burst int) *NiceTransportBuilder {
 	b.interval = interval
 	b.burst = burst
+	return b
+}
+
+func (b *NiceTransportBuilder) SetRateLimiter(rl *rate.Limiter) *NiceTransportBuilder {
+	b.rateLimiter = rl
 	return b
 }
 
@@ -109,11 +114,11 @@ func (b *NiceTransportBuilder) Build() (*NiceTransport, error) {
 	}
 
 	return &NiceTransport{
-		DefaultHeaders:      b.defaultHeaders,
-		Backoff:             b.backoff,
-		MaxBackoff:          b.maxBackoff,
-		MaxTries:            b.maxTries,
-		RateLimiter:         b.rateLimiter,
-		DownstreamTransport: b.downstreamTransport,
+		defaultHeaders:      b.defaultHeaders,
+		backoff:             b.backoff,
+		maxBackoff:          b.maxBackoff,
+		maxTries:            b.maxTries,
+		rateLimiter:         b.rateLimiter,
+		downstreamTransport: b.downstreamTransport,
 	}, nil
 }

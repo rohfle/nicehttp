@@ -86,7 +86,7 @@ func createClientWithEndpoint(settings *NiceTransport, endpoint *MockEndpoint) *
 	if settings == nil {
 		settings = &NiceTransport{}
 	}
-	settings.DownstreamTransport = &MockTransport{
+	settings.downstreamTransport = &MockTransport{
 		Endpoint: endpoint,
 	}
 
@@ -104,13 +104,13 @@ func TestRoundTripperFirstRun(t *testing.T) {
 	// context with deadline set
 	// limiter wait with context expires
 	settings := NiceTransport{
-		DefaultHeaders: http.Header{
+		defaultHeaders: http.Header{
 			"Empty-Header": []string{}, // test headers with empty value list
 		},
-		RateLimiter: rate.NewLimiter(rate.Every(1*time.Millisecond), 1),
-		Backoff:     100 * time.Millisecond,
-		MaxBackoff:  1 * time.Second,
-		MaxTries:    5,
+		rateLimiter: rate.NewLimiter(rate.Every(1*time.Millisecond), 1),
+		backoff:     100 * time.Millisecond,
+		maxBackoff:  1 * time.Second,
+		maxTries:    5,
 	}
 
 	expectedBody := "This is the body"
@@ -190,10 +190,10 @@ func TestRoundTripperSecondRun(t *testing.T) {
 	// reaches maxretries
 	// backoff max reached limiting
 	settings := NiceTransport{
-		RateLimiter: rate.NewLimiter(rate.Every(1*time.Millisecond), 1),
-		Backoff:     10 * time.Millisecond,
-		MaxBackoff:  30 * time.Millisecond,
-		MaxTries:    5,
+		rateLimiter: rate.NewLimiter(rate.Every(1*time.Millisecond), 1),
+		backoff:     10 * time.Millisecond,
+		maxBackoff:  30 * time.Millisecond,
+		maxTries:    5,
 	}
 
 	expectedBody := "This is the body"
@@ -327,11 +327,11 @@ func TestRoundTripperFourthRun(t *testing.T) {
 	// 	}
 
 	settings := NiceTransport{
-		RateLimiter:    rate.NewLimiter(rate.Every(1*time.Millisecond), 1),
-		Backoff:        1 * time.Millisecond,
-		MaxBackoff:     1 * time.Millisecond,
-		MaxTries:       5,
-		DefaultHeaders: map[string][]string{"Some-Header": {}},
+		rateLimiter:    rate.NewLimiter(rate.Every(1*time.Millisecond), 1),
+		backoff:        1 * time.Millisecond,
+		maxBackoff:     1 * time.Millisecond,
+		maxTries:       5,
+		defaultHeaders: map[string][]string{"Some-Header": {}},
 	}
 
 	expectedCalls := 1
@@ -391,10 +391,10 @@ func TestRoundTripperFourthRun(t *testing.T) {
 
 func TestRoundTripperMultithread(t *testing.T) {
 	settings := NiceTransport{
-		RateLimiter: rate.NewLimiter(rate.Every(10*time.Millisecond), 1),
-		Backoff:     10 * time.Millisecond,
-		MaxBackoff:  100 * time.Millisecond,
-		MaxTries:    5,
+		rateLimiter: rate.NewLimiter(rate.Every(10*time.Millisecond), 1),
+		backoff:     10 * time.Millisecond,
+		maxBackoff:  100 * time.Millisecond,
+		maxTries:    5,
 	}
 
 	numberOfThreads := 10
@@ -517,9 +517,9 @@ func TestRoundTripperRetryAfterSeconds(t *testing.T) {
 	}
 
 	settings := &NiceTransport{
-		RateLimiter: rate.NewLimiter(rate.Every(1*time.Millisecond), 1),
-		Backoff:     1 * time.Millisecond,
-		MaxBackoff:  1 * time.Millisecond,
+		rateLimiter: rate.NewLimiter(rate.Every(1*time.Millisecond), 1),
+		backoff:     1 * time.Millisecond,
+		maxBackoff:  1 * time.Millisecond,
 	}
 
 	// test Clone while we are at it
