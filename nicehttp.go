@@ -16,22 +16,19 @@ import (
 
 func getVersion() string {
 	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		return "unknown"
-	}
-
-	for _, mod := range info.Deps {
-		if mod.Path != "github.com/rohfle/nicehttp" {
-			continue
-		}
-		if mod.Replace != nil {
-			mod = mod.Replace
-		}
-		if mod.Version != "" && mod.Version != "(devel)" {
-			return mod.Version
+	if ok {
+		for _, mod := range info.Deps {
+			if mod.Path != "github.com/rohfle/nicehttp" {
+				continue
+			}
+			if mod.Replace != nil {
+				mod = mod.Replace
+			}
+			if mod.Version != "" && mod.Version != "(devel)" {
+				return mod.Version
+			}
 		}
 	}
-
 	return "unknown"
 }
 
@@ -50,12 +47,10 @@ func newReadSeekCloser(b []byte) io.ReadSeekCloser {
 	return readSeekCloser{bytes.NewReader(b)}
 }
 
-type Settings struct {
+type NiceTransport struct {
 	// Headers added to every request
 	// Include headers like "User-Agent" and "Authorization" here
 	DefaultHeaders http.Header
-	// Minimum time between successful requests
-	RequestInterval time.Duration
 	// Amount of time to wait between errors
 	// Doubled after every successive fail
 	Backoff time.Duration
@@ -64,84 +59,28 @@ type Settings struct {
 	MaxBackoff time.Duration
 	// Number of times to retry the request on failure
 	MaxTries int
-	// Maximum number of connections per host
-	MaxConnsPerHost int
-	// Transport allows override of downstream roundtripper
+	// DownstreamTransport allows override of downstream roundtripper
 	// Not specifying a value means http.DefaultTransport will be used
-	Transport http.RoundTripper
+	DownstreamTransport http.RoundTripper
+	// RateLimter ensures a minimum rate limit between the start of requests
+	RateLimiter *rate.Limiter
 }
 
-// NewClient creates a nice HTTP client that features rate limit, backoff and max retries
-func NewClient(settings *Settings) *http.Client {
-	if settings == nil {
-		settings = &Settings{}
+func (s *NiceTransport) Clone() *NiceTransport {
+	var snew NiceTransport
+	snew.DefaultHeaders = s.DefaultHeaders.Clone()
+	snew.Backoff = s.Backoff
+	snew.MaxBackoff = s.MaxBackoff
+	snew.MaxTries = s.MaxTries
+	snew.DownstreamTransport = s.DownstreamTransport
+	if s.RateLimiter != nil {
+		snew.RateLimiter = rate.NewLimiter(s.RateLimiter.Limit(), s.RateLimiter.Burst())
 	}
-
-	// Provide some nice default values
-	requestInterval := settings.RequestInterval
-	if requestInterval <= 0 {
-		requestInterval = 1 * time.Second
-	}
-
-	maxTries := settings.MaxTries
-	if maxTries <= 0 {
-		maxTries = 5
-	}
-
-	backoff := settings.Backoff
-	if backoff <= 0 {
-		backoff = 10 * time.Second
-	}
-
-	maxBackoff := settings.MaxBackoff
-	if maxBackoff <= 0 {
-		maxBackoff = 120 * time.Second
-	}
-
-	maxConnsPerHost := settings.MaxConnsPerHost
-	if maxConnsPerHost <= 0 {
-		maxConnsPerHost = 1
-	}
-
-	defaultHeaders := settings.DefaultHeaders
-	if defaultHeaders == nil {
-		defaultHeaders = make(http.Header)
-	}
-	if defaultHeaders.Get("User-Agent") == "" {
-		defaultHeaders.Set("User-Agent", DefaultUserAgent)
-	}
-
-	limiter := rate.NewLimiter(rate.Every(requestInterval), 1)
-
-	downstreamTransport := settings.Transport
-	if downstreamTransport == nil {
-		downstreamTransport = http.DefaultTransport.(*http.Transport).Clone()
-	}
-
-	return &http.Client{
-		Transport: &niceRoundTripper{
-			roundTripper:   downstreamTransport,
-			limiter:        limiter,
-			defaultHeaders: defaultHeaders,
-			backoff:        backoff,
-			maxBackoff:     maxBackoff,
-			maxTries:       maxTries,
-		},
-	}
-}
-
-// niceRoundTripper is a custom transport that enforces rate limits
-type niceRoundTripper struct {
-	roundTripper   http.RoundTripper // underlying RoundTripper to use
-	limiter        *rate.Limiter
-	defaultHeaders http.Header
-	backoff        time.Duration
-	maxBackoff     time.Duration
-	maxTries       int
+	return &snew
 }
 
 // calculateWaitAfterError calculates a wait duration based on headers and current backoff
-func (rt *niceRoundTripper) calculateWaitAfterError(resp *http.Response, backoff time.Duration) time.Duration {
+func (rt *NiceTransport) calculateWaitAfterError(resp *http.Response, backoff time.Duration) time.Duration {
 	waitTime := backoff
 	// retry-after header sometimes set on 429 too many requests
 	val := resp.Header.Get("Retry-After")
@@ -160,9 +99,9 @@ func (rt *niceRoundTripper) calculateWaitAfterError(resp *http.Response, backoff
 }
 
 // RoundTrip is a custom implementation that handles backoff, error retries and done context
-func (rt *niceRoundTripper) RoundTrip(origReq *http.Request) (*http.Response, error) {
+func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error) {
 	// Set the initial backoff
-	backoff := rt.backoff
+	backoff := rt.Backoff
 
 	// in order to retry requests, we need io.Seeker to support rewinding the body
 	var bodySeeker io.ReadSeekCloser = nil
@@ -213,11 +152,8 @@ func (rt *niceRoundTripper) RoundTrip(origReq *http.Request) (*http.Response, er
 		req := origReq.Clone(origReq.Context())
 
 		// Set default headers (used for User-Agent and Authorization)
-		if len(rt.defaultHeaders) > 0 {
-			for key, values := range rt.defaultHeaders {
-				if len(values) == 0 {
-					continue
-				}
+		if len(rt.DefaultHeaders) > 0 {
+			for key, values := range rt.DefaultHeaders {
 				if len(req.Header[key]) > 0 {
 					// Header already exists with at least one value, do not replace with defaults
 					continue
@@ -230,7 +166,7 @@ func (rt *niceRoundTripper) RoundTrip(origReq *http.Request) (*http.Response, er
 		}
 
 		// Wait patiently for the limiter before sending the request
-		if err := rt.limiter.Wait(req.Context()); err != nil {
+		if err := rt.RateLimiter.Wait(req.Context()); err != nil {
 			// Context is cancelled or has exceeded deadline
 			return nil, err
 		}
@@ -238,10 +174,10 @@ func (rt *niceRoundTripper) RoundTrip(origReq *http.Request) (*http.Response, er
 		// Send the request using the downstream roundtripper
 		// This call tries to close req.Body, which we don't want because we rewind
 		// but we handle this with the io.NopCloser wrapper above
-		resp, err := rt.roundTripper.RoundTrip(req)
+		resp, err := rt.DownstreamTransport.RoundTrip(req)
 
 		// On the last retry, return the response and error no matter what
-		if tries >= rt.maxTries {
+		if tries >= rt.MaxTries {
 			return resp, err
 		}
 
@@ -279,7 +215,7 @@ func (rt *niceRoundTripper) RoundTrip(origReq *http.Request) (*http.Response, er
 			}
 
 			// Double backoff each retry
-			backoff = min(backoff*2, rt.maxBackoff)
+			backoff = min(backoff*2, rt.MaxBackoff)
 			// And try again!
 			continue
 		}

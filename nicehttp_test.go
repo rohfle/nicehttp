@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/time/rate"
 )
 
 type MockEndpoint struct {
@@ -80,25 +82,35 @@ func checkDeadline(t *testing.T, req *http.Request, callCount int, deadline time
 	}
 }
 
-func createClientWithEndpoint(settings *Settings, endpoint *MockEndpoint) *http.Client {
+func createClientWithEndpoint(settings *NiceTransport, endpoint *MockEndpoint) *http.Client {
 	if settings == nil {
-		settings = &Settings{}
+		settings = &NiceTransport{}
 	}
-	settings.Transport = &MockTransport{
+	settings.DownstreamTransport = &MockTransport{
 		Endpoint: endpoint,
 	}
-	return NewClient(settings)
+
+	transport, err := NewNiceTransportBuilder().Set(settings).Build()
+	if err != nil {
+		panic(err)
+	}
+
+	return &http.Client{
+		Transport: transport,
+	}
 }
 
 func TestRoundTripperFirstRun(t *testing.T) {
 	// context with deadline set
 	// limiter wait with context expires
-	settings := Settings{
+	settings := NiceTransport{
 		DefaultHeaders: http.Header{
 			"Empty-Header": []string{}, // test headers with empty value list
 		},
-		RequestInterval: 1 * time.Millisecond,
-		Backoff:         100 * time.Millisecond,
+		RateLimiter: rate.NewLimiter(rate.Every(1*time.Millisecond), 1),
+		Backoff:     100 * time.Millisecond,
+		MaxBackoff:  1 * time.Second,
+		MaxTries:    5,
 	}
 
 	expectedBody := "This is the body"
@@ -177,11 +189,11 @@ func TestRoundTripperSecondRun(t *testing.T) {
 	// xbody is non-seekable
 	// reaches maxretries
 	// backoff max reached limiting
-	settings := Settings{
-		RequestInterval: 1 * time.Millisecond,
-		Backoff:         10 * time.Millisecond,
-		MaxBackoff:      30 * time.Millisecond,
-		MaxTries:        5,
+	settings := NiceTransport{
+		RateLimiter: rate.NewLimiter(rate.Every(1*time.Millisecond), 1),
+		Backoff:     10 * time.Millisecond,
+		MaxBackoff:  30 * time.Millisecond,
+		MaxTries:    5,
 	}
 
 	expectedBody := "This is the body"
@@ -248,11 +260,12 @@ func TestRoundTripperThirdRun(t *testing.T) {
 	// 	return nil, err
 	// }
 
-	settings := Settings{
-		RequestInterval: 500 * time.Millisecond,
-		Backoff:         1 * time.Millisecond,
-		MaxBackoff:      1 * time.Millisecond,
-		MaxTries:        5,
+	settings, err := NewNiceTransportBuilder().
+		SetRateLimit(500*time.Millisecond, 1).
+		SetBackoff(1*time.Millisecond, 1*time.Millisecond).
+		SetMaxTries(5).Build()
+	if err != nil {
+		t.Fatalf("while building settings: %s", err)
 	}
 
 	expectedCalls := 1
@@ -280,7 +293,7 @@ func TestRoundTripperThirdRun(t *testing.T) {
 		},
 	}
 
-	client := createClientWithEndpoint(&settings, endpoint)
+	client := createClientWithEndpoint(settings, endpoint)
 
 	endpoint.Deadline = time.Now().UTC().Add(deadlineDuration)
 
@@ -313,11 +326,12 @@ func TestRoundTripperFourthRun(t *testing.T) {
 	// 	case <-time.After(waitTime):
 	// 	}
 
-	settings := Settings{
-		RequestInterval: 1 * time.Millisecond,
-		Backoff:         1 * time.Millisecond,
-		MaxBackoff:      1 * time.Millisecond,
-		MaxTries:        5,
+	settings := NiceTransport{
+		RateLimiter:    rate.NewLimiter(rate.Every(1*time.Millisecond), 1),
+		Backoff:        1 * time.Millisecond,
+		MaxBackoff:     1 * time.Millisecond,
+		MaxTries:       5,
+		DefaultHeaders: map[string][]string{"Some-Header": {}},
 	}
 
 	expectedCalls := 1
@@ -329,6 +343,9 @@ func TestRoundTripperFourthRun(t *testing.T) {
 		Timings:   nil,
 		Deadline:  time.Time{},
 		Handler: func(endpoint *MockEndpoint, callCount int, req *http.Request) (*http.Response, error) {
+			if _, exists := req.Header["Some-Header"]; exists {
+				return nil, errors.New("expected header Some-Header with no values to not be sent in request")
+			}
 			checkDeadline(t, req, callCount, endpoint.Deadline)
 
 			time.Sleep(500 * time.Millisecond)
@@ -373,11 +390,11 @@ func TestRoundTripperFourthRun(t *testing.T) {
 }
 
 func TestRoundTripperMultithread(t *testing.T) {
-	settings := Settings{
-		RequestInterval: 10 * time.Millisecond,
-		Backoff:         10 * time.Millisecond,
-		MaxBackoff:      100 * time.Millisecond,
-		MaxTries:        5,
+	settings := NiceTransport{
+		RateLimiter: rate.NewLimiter(rate.Every(10*time.Millisecond), 1),
+		Backoff:     10 * time.Millisecond,
+		MaxBackoff:  100 * time.Millisecond,
+		MaxTries:    5,
 	}
 
 	numberOfThreads := 10
@@ -474,6 +491,9 @@ func TestRoundTripperRetryAfterSeconds(t *testing.T) {
 		Deadline:  time.Time{},
 		Handler: func(endpoint *MockEndpoint, callCount int, req *http.Request) (*http.Response, error) {
 			checkGeneralRequestStuff(t, req, callCount, "GET", "")
+			if userAgent := req.Header.Get("User-Agent"); userAgent != "something different" {
+				t.Fatalf("unexpected header User-Agent %q", userAgent)
+			}
 			switch endpoint.CallCount {
 			case 1:
 				header := make(http.Header)
@@ -496,14 +516,23 @@ func TestRoundTripperRetryAfterSeconds(t *testing.T) {
 		},
 	}
 
-	settings := &Settings{
-		RequestInterval: 1 * time.Millisecond,
-		Backoff:         1 * time.Millisecond,
-		MaxBackoff:      1 * time.Millisecond,
+	settings := &NiceTransport{
+		RateLimiter: rate.NewLimiter(rate.Every(1*time.Millisecond), 1),
+		Backoff:     1 * time.Millisecond,
+		MaxBackoff:  1 * time.Millisecond,
 	}
 
+	// test Clone while we are at it
+	settings = settings.Clone()
+
 	client := createClientWithEndpoint(settings, endpoint)
-	resp, err := client.Get("http://example.com")
+	req, err := http.NewRequest("GET", "http://example.com", nil)
+	if err != nil {
+		t.Fatal("unexpected error while making request:", err)
+	}
+
+	req.Header.Set("User-Agent", "something different")
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatal("expected 200 response, got unexpected error", err)
 	}
@@ -515,8 +544,7 @@ func TestRoundTripperRetryAfterSeconds(t *testing.T) {
 		t.Fatalf("expected call count %d, got %d", expectedCalls, endpoint.CallCount)
 	}
 }
-
-func ExampleNewClient() {
+func ExampleNiceTransportBuilder() {
 	// Mock HTTP server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "hello world")
@@ -524,27 +552,43 @@ func ExampleNewClient() {
 	defer server.Close()
 
 	headers := make(http.Header)
-	headers.Set("User-Agent", "your-user-agent-here/0.1")
+	headers.Set("Authentication", "Bearer xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
 
-	settings := &Settings{
-		DefaultHeaders:  headers,
-		RequestInterval: 1 * time.Second,
-		Backoff:         1 * time.Second,
-		MaxBackoff:      120 * time.Second,
-		MaxTries:        10,
-		MaxConnsPerHost: 1,
+	downstream := http.DefaultTransport.(*http.Transport).Clone()
+	downstream.MaxConnsPerHost = 1
+	// downstream.TLSClientConfig = &tls.Config{
+	//     InsecureSkipVerify: true, // Skip certificate verification
+	// }
+
+	transport, err := NewNiceTransportBuilder().
+		SetDefaultHeaders(headers).
+		SetUserAgent("your-user-agent-here/0.1").
+		SetRateLimit(1*time.Second, 1).
+		SetBackoff(1*time.Second, 120*time.Second).
+		SetMaxTries(10).
+		SetDownstreamTransport(downstream).
+		Build()
+	if err != nil {
+		fmt.Println("error:", err)
+		return
 	}
 
-	client := NewClient(settings)
+	client := &http.Client{
+		Transport: transport,
+		// CheckRedirect:
+		// Timeout:
+	}
 
 	resp, err := client.Get(server.URL)
 	if err != nil {
 		fmt.Println("error:", err)
+		return
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		fmt.Println("error:", err)
+		return
 	}
 	fmt.Println("got resp:", string(data))
 	// Output: got resp: hello world

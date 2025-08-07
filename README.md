@@ -20,31 +20,46 @@ import (
 )
 
 func main() {
-    headers := make(http.Header)
-    headers.Set("User-Agent", "your-user-agent-here/0.1")
+	headers := make(http.Header)
+	headers.Set("Authentication", "Bearer xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
 
-    settings := &nicehttp.Settings{
-        DefaultHeaders: headers,
-        RequestInterval: 1 * time.Second,
-        Backoff:         1 * time.Second,
-        MaxBackoff:      120 * time.Second,
-        MaxTries:        10,
-        MaxConnsPerHost: 1,
-    }
+	downstream := http.DefaultTransport.(*http.Transport).Clone()
+	downstream.MaxConnsPerHost = 1
+	// downstream.TLSClientConfig = &tls.Config{
+	//     InsecureSkipVerify: true, // Skip certificate verification
+	// }
 
-    client := nicehttp.NewClient(settings)
+	transport, err := NewNiceTransportBuilder().
+		SetDefaultHeaders(headers).
+		SetUserAgent("your-user-agent-here/0.1").
+		SetRateLimit(1*time.Second, 1).
+		SetBackoff(1*time.Second, 120*time.Second).
+		SetMaxTries(10).
+		SetDownstreamTransport(downstream).
+		Build()
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
 
-    resp, err := client.Get(server.URL)
-    if err != nil {
-        fmt.Println("error:", err)
-    }
-    defer resp.Body.Close()
-    data, err := io.ReadAll(resp.Body)
-    if err != nil {
-        fmt.Println("error:", err)
-    }
-    fmt.Println("got resp:", string(data))
-    // Output: got resp: hello world
+	client := &http.Client{
+		Transport: transport,
+		// CheckRedirect:
+		// Timeout:
+	}
+
+	resp, err := client.Get(server.URL)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	fmt.Println("got resp:", string(data))
 }
 
 ```
