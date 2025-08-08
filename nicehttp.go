@@ -10,8 +10,6 @@ import (
 	"runtime/debug"
 	"strconv"
 	"time"
-
-	"golang.org/x/time/rate"
 )
 
 func getVersion() string {
@@ -51,58 +49,49 @@ type NiceTransport struct {
 	// Headers added to every request
 	// Include headers like "User-Agent" and "Authorization" here
 	defaultHeaders http.Header
-	// Amount of time to wait between errors
-	// Doubled after every successive fail
-	backoff time.Duration
-	// Maximum amount of time to wait between errors
-	// Backoff will be clamped to this value
-	maxBackoff time.Duration
 	// Number of times to retry the request on failure
 	maxTries int
 	// downstreamTransport allows override of downstream roundtripper
 	// Not specifying a value means http.DefaultTransport will be used
 	downstreamTransport http.RoundTripper
 	// RateLimter ensures a minimum rate limit between the start of requests
-	rateLimiter *rate.Limiter
+	limiter *Limiter
 }
 
 func (s *NiceTransport) Clone() *NiceTransport {
 	var snew NiceTransport
 	snew.defaultHeaders = s.defaultHeaders.Clone()
-	snew.backoff = s.backoff
-	snew.maxBackoff = s.maxBackoff
 	snew.maxTries = s.maxTries
 	snew.downstreamTransport = s.downstreamTransport
-	if s.rateLimiter != nil {
-		snew.rateLimiter = rate.NewLimiter(s.rateLimiter.Limit(), s.rateLimiter.Burst())
+	if s.limiter != nil {
+		snew.limiter = s.limiter.Clone()
 	}
 	return &snew
 }
 
-// calculateWaitAfterError calculates a wait duration based on headers and current backoff
-func (rt *NiceTransport) calculateWaitAfterError(resp *http.Response, backoff time.Duration) time.Duration {
-	waitTime := backoff
-	// retry-after header sometimes set on 429 too many requests
-	val := resp.Header.Get("Retry-After")
-	if secs, err := strconv.Atoi(val); err == nil {
-		waitTime = time.Duration(secs) * time.Second
-	} else if t, err := http.ParseTime(val); err == nil {
-		waitTime = t.Sub(time.Now().UTC())
+func shouldRetryRequest(resp *http.Response, err error) bool {
+	if err != nil {
+		// Retry if a network error has occurred, such as
+		// - connection timeouts,
+		// - dns resolution errors,
+		// - connection reset
+		return true
 	}
 
-	// wait at least backoff even if Retry-After encourages to try again sooner
-	if waitTime < backoff {
-		waitTime = backoff
+	switch resp.StatusCode {
+	case 429, 503, 504:
+		// The request can be retried with backoff if its status is one of:
+		// - 429 Too Many Requests
+		// - 503 Service Unavailable
+		// - 504 Gateway Timeout
+		return true
 	}
 
-	return waitTime
+	return false
 }
 
 // RoundTrip is a custom implementation that handles backoff, error retries and done context
 func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error) {
-	// Set the initial backoff
-	backoff := rt.backoff
-
 	// in order to retry requests, we need io.Seeker to support rewinding the body
 	var bodySeeker io.ReadSeekCloser = nil
 	// the body might be nil for some methods (eg GET / HEAD)
@@ -130,98 +119,67 @@ func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error
 		}
 	}
 
+	// Set default headers (used for User-Agent and Authorization)
+	if len(rt.defaultHeaders) > 0 {
+		for key, values := range rt.defaultHeaders {
+			if len(origReq.Header[key]) > 0 {
+				// Header already exists with at least one value, do not replace with defaults
+				continue
+			}
+			// Support header keys with multiple values
+			for _, val := range values {
+				origReq.Header.Add(key, val)
+			}
+		}
+	}
+
 	tries := 0
 	for {
 		// This loop will run up to rt.maxTries times
 		tries += 1
 
-		// Check if context is done on the original request before attempting anything
-		select {
-		case <-origReq.Context().Done():
-			// The original request has timed out, so return its error with no result
-			return nil, origReq.Context().Err()
-		default:
-		}
-
-		// Rewind the body to the start on retries when body is not nil
-		if bodySeeker != nil && tries > 0 {
-			bodySeeker.Seek(0, io.SeekStart)
-		}
-
 		// The request must be cloned each time it is sent
 		req := origReq.Clone(origReq.Context())
 
-		// Set default headers (used for User-Agent and Authorization)
-		if len(rt.defaultHeaders) > 0 {
-			for key, values := range rt.defaultHeaders {
-				if len(req.Header[key]) > 0 {
-					// Header already exists with at least one value, do not replace with defaults
-					continue
-				}
-				// Support header keys with multiple values
-				for _, val := range values {
-					req.Header.Add(key, val)
-				}
-			}
-		}
-
 		// Wait patiently for the limiter before sending the request
-		if err := rt.rateLimiter.Wait(req.Context()); err != nil {
+		if err := rt.limiter.Wait(req.Context()); err != nil {
 			// Context is cancelled or has exceeded deadline
 			return nil, err
 		}
 
-		// Send the request using the downstream roundtripper
-		// This call tries to close req.Body, which we don't want because we rewind
-		// but we handle this with the io.NopCloser wrapper above
+		// Sending request using downstream roundtripper tries to close req.Body
+		// but this is handled by the io.NopCloser wrapper so retrying is possible
 		resp, err := rt.downstreamTransport.RoundTrip(req)
 
-		// On the last retry, return the response and error no matter what
-		if tries >= rt.maxTries {
+		needsRetry := shouldRetryRequest(resp, err)
+		retryAfter := parseRetryAfterHeader(resp)
+		rt.limiter.Done(needsRetry, retryAfter)
+
+		if tries >= rt.maxTries || !needsRetry {
+			// The request either succeeded or failed with an http status that cannot be retried
+			// Or the retry limit has been reached so return the response and error no matter what
+			// Return the response and error to the caller
 			return resp, err
 		}
 
-		// Check if there is a response error
-		if err != nil {
-			// A network error has occurred, such as
-			// - connection timeouts,
-			// - dns resolution errors,
-			// - connection reset
-			// Retry respecting request interval but without additional backoff
-			// No need to close the resp.Body on error
-			// And try again!
-			continue
+		// Rewind the body to the start on retries when body is not nil
+		if bodySeeker != nil {
+			bodySeeker.Seek(0, io.SeekStart)
 		}
-
-		// No error, check the returned status code
-		switch resp.StatusCode {
-		case 429, 503, 504:
-			// The request can be retried with backoff if its status is one of:
-			// - 429 Too Many Requests
-			// - 503 Service Unavailable
-			// - 504 Gateway Timeout
-			waitTime := rt.calculateWaitAfterError(resp, backoff)
-			// Close the response body before retry or memory gonna leak
-			if resp.Body != nil {
-				resp.Body.Close()
-			}
-
-			select {
-			case <-origReq.Context().Done():
-				// Context is cancelled or has exceeded deadline
-				return nil, origReq.Context().Err()
-			case <-time.After(waitTime):
-				// Sleep before retry zzz
-			}
-
-			// Double backoff each retry
-			backoff = min(backoff*2, rt.maxBackoff)
-			// And try again!
-			continue
-		}
-
-		// The request either succeeded or failed with an error that cannot be retried
-		// Either way, return the result to the caller
-		return resp, err
 	}
+}
+
+func parseRetryAfterHeader(resp *http.Response) time.Duration {
+	if resp == nil {
+		return 0
+	}
+	val := resp.Header.Get("Retry-After")
+	if val != "" {
+		if secs, err := strconv.Atoi(val); err == nil {
+			return time.Duration(secs) * time.Second
+		} else if t, err := http.ParseTime(val); err == nil {
+			return time.Until(t)
+		} // TODO: log unexpected
+	}
+	return 0
 }

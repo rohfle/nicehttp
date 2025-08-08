@@ -3,20 +3,16 @@ package nicehttp
 import (
 	"net/http"
 	"time"
-
-	"golang.org/x/time/rate"
 )
 
 // Builder struct holds raw inputs
 type NiceTransportBuilder struct {
 	defaultHeaders      http.Header
-	rateLimiter         *rate.Limiter
-	backoff             time.Duration
-	maxBackoff          time.Duration
-	interval            time.Duration
-	burst               int
+	minWait             time.Duration
+	maxWait             time.Duration
 	maxTries            int
 	downstreamTransport http.RoundTripper
+	limiter             *Limiter
 }
 
 // Constructor
@@ -29,13 +25,12 @@ func NewNiceTransportBuilder() *NiceTransportBuilder {
 // Chained setters
 func (b *NiceTransportBuilder) Set(settings *NiceTransport) *NiceTransportBuilder {
 	b.SetDefaultHeaders(settings.defaultHeaders)
-	b.SetBackoff(settings.backoff, settings.maxBackoff)
 	b.SetMaxTries(settings.maxTries)
 	b.SetDownstreamTransport(settings.downstreamTransport)
-	b.rateLimiter = nil
-	if settings.rateLimiter != nil {
-		rl := settings.rateLimiter
-		b.rateLimiter = rate.NewLimiter(rl.Limit(), rl.Burst())
+	b.SetRequestInterval(b.minWait, b.maxWait)
+	b.limiter = nil
+	if settings.limiter != nil {
+		b.limiter = settings.limiter.Clone()
 	}
 	return b
 }
@@ -58,20 +53,9 @@ func (b *NiceTransportBuilder) SetUserAgent(ua string) *NiceTransportBuilder {
 	return b
 }
 
-func (b *NiceTransportBuilder) SetRateLimit(interval time.Duration, burst int) *NiceTransportBuilder {
-	b.interval = interval
-	b.burst = burst
-	return b
-}
-
-func (b *NiceTransportBuilder) SetRateLimiter(rl *rate.Limiter) *NiceTransportBuilder {
-	b.rateLimiter = rl
-	return b
-}
-
-func (b *NiceTransportBuilder) SetBackoff(backoff time.Duration, maxBackoff time.Duration) *NiceTransportBuilder {
-	b.backoff = backoff
-	b.maxBackoff = maxBackoff
+func (b *NiceTransportBuilder) SetRequestInterval(minWait time.Duration, maxWait time.Duration) *NiceTransportBuilder {
+	b.minWait = minWait
+	b.maxWait = maxWait
 	return b
 }
 
@@ -88,37 +72,28 @@ func (b *NiceTransportBuilder) SetDownstreamTransport(rt http.RoundTripper) *Nic
 // Finalize and return
 func (b *NiceTransportBuilder) Build() (*NiceTransport, error) {
 	// Set defaults
-	if b.backoff <= 0 {
-		b.backoff = 1 * time.Second
-	}
-	if b.maxBackoff <= 0 {
-		b.maxBackoff = 120 * time.Second
-	}
 	if b.maxTries <= 0 {
 		b.maxTries = 10
 	}
 	if b.downstreamTransport == nil {
 		transport := http.DefaultTransport.(*http.Transport).Clone()
-		transport.MaxConnsPerHost = 1
 		b.downstreamTransport = transport
 	}
 
-	if b.rateLimiter == nil {
-		if b.interval <= 0 {
-			b.interval = 1 * time.Second
+	if b.limiter == nil {
+		if b.minWait <= 0 {
+			b.minWait = 1 * time.Second
 		}
-		if b.burst <= 0 {
-			b.burst = 1
+		if b.maxWait <= 0 {
+			b.maxWait = 120 * time.Second
 		}
-		b.rateLimiter = rate.NewLimiter(rate.Every(b.interval), b.burst)
+		b.limiter = NewLimiter(b.minWait, b.maxWait)
 	}
 
 	return &NiceTransport{
 		defaultHeaders:      b.defaultHeaders,
-		backoff:             b.backoff,
-		maxBackoff:          b.maxBackoff,
 		maxTries:            b.maxTries,
-		rateLimiter:         b.rateLimiter,
+		limiter:             b.limiter,
 		downstreamTransport: b.downstreamTransport,
 	}, nil
 }

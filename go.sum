@@ -1,2 +1,4 @@
-golang.org/x/time v0.11.0 h1:/bpjEDfN9tkoN/ryeYHnv5hcMlc8ncjMcM4XBk5NWV0=
-golang.org/x/time v0.11.0/go.mod h1:CDIdPxbZBQxdj6cxyCIdrNogrJKMJ7pr37NYpMcMDSg=
+github.com/neilotoole/fifomu v0.1.2 h1:sgJhcOTlEXGVj/nS5Bb8/qV+1wgmk+KPavcNuDw0rDM=
+github.com/neilotoole/fifomu v0.1.2/go.mod h1:9di2j+xBgr+nX6IPmpwQVxKt6yzgPLk9WXEj/aLwcao=
+golang.org/x/sync v0.6.0 h1:5BMeUDZ7vkXGfEr1x9B4bRcTH4lpkTkpdh0T/J+qjbQ=
+golang.org/x/sync v0.6.0/go.mod h1:Czt+wKu1gCyEFDUtn0jG5QVvpJ6rzVqr5aXyt9drQfk=

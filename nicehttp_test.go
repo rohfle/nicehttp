@@ -12,8 +12,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"golang.org/x/time/rate"
 )
 
 type MockEndpoint struct {
@@ -107,15 +105,13 @@ func TestRoundTripperFirstRun(t *testing.T) {
 		defaultHeaders: http.Header{
 			"Empty-Header": []string{}, // test headers with empty value list
 		},
-		rateLimiter: rate.NewLimiter(rate.Every(1*time.Millisecond), 1),
-		backoff:     100 * time.Millisecond,
-		maxBackoff:  1 * time.Second,
-		maxTries:    5,
+		limiter:  NewLimiter(100*time.Millisecond, 1*time.Second),
+		maxTries: 5,
 	}
 
 	expectedBody := "This is the body"
 	expectedCalls := 3
-	deadlineDuration := 300 * time.Millisecond
+	deadlineDuration := 400 * time.Millisecond
 
 	endpoint := &MockEndpoint{
 		CallCount: 0,
@@ -125,11 +121,10 @@ func TestRoundTripperFirstRun(t *testing.T) {
 		Handler: func(endpoint *MockEndpoint, callCount int, req *http.Request) (*http.Response, error) {
 			checkGeneralRequestStuff(t, req, callCount, "POST", expectedBody)
 			checkDeadline(t, req, callCount, endpoint.Deadline)
-
 			switch callCount {
 			case 1: // +0ms    test network error
 				return nil, errors.New("simulated network error")
-			case 2: // +1ms  test 429 error
+			case 2: // +151ms  test 429 error
 				retryTime := time.Now().UTC().Add(100 * time.Millisecond)
 				header := make(http.Header)
 				header.Set("Retry-After", retryTime.Format(http.TimeFormat))
@@ -138,7 +133,7 @@ func TestRoundTripperFirstRun(t *testing.T) {
 					Body:       io.NopCloser(strings.NewReader("Too Many Requests")),
 					Header:     header,
 				}, nil
-			case 3: // +101ms test timeout
+			case 3: // +375ms test timeout
 				select {
 				case <-req.Context().Done(): // Context cancelled so don't sleep please
 					return nil, req.Context().Err()
@@ -190,10 +185,8 @@ func TestRoundTripperSecondRun(t *testing.T) {
 	// reaches maxretries
 	// backoff max reached limiting
 	settings := NiceTransport{
-		rateLimiter: rate.NewLimiter(rate.Every(1*time.Millisecond), 1),
-		backoff:     10 * time.Millisecond,
-		maxBackoff:  30 * time.Millisecond,
-		maxTries:    5,
+		limiter:  NewLimiter(10*time.Millisecond, 30*time.Millisecond),
+		maxTries: 5,
 	}
 
 	expectedBody := "This is the body"
@@ -261,8 +254,7 @@ func TestRoundTripperThirdRun(t *testing.T) {
 	// }
 
 	settings, err := NewNiceTransportBuilder().
-		SetRateLimit(500*time.Millisecond, 1).
-		SetBackoff(1*time.Millisecond, 1*time.Millisecond).
+		SetRequestInterval(500*time.Millisecond, 500*time.Millisecond).
 		SetMaxTries(5).Build()
 	if err != nil {
 		t.Fatalf("while building settings: %s", err)
@@ -327,9 +319,7 @@ func TestRoundTripperFourthRun(t *testing.T) {
 	// 	}
 
 	settings := NiceTransport{
-		rateLimiter:    rate.NewLimiter(rate.Every(1*time.Millisecond), 1),
-		backoff:        1 * time.Millisecond,
-		maxBackoff:     1 * time.Millisecond,
+		limiter:        NewLimiter(1*time.Millisecond, 1*time.Millisecond),
 		maxTries:       5,
 		defaultHeaders: map[string][]string{"Some-Header": {}},
 	}
@@ -391,10 +381,8 @@ func TestRoundTripperFourthRun(t *testing.T) {
 
 func TestRoundTripperMultithread(t *testing.T) {
 	settings := NiceTransport{
-		rateLimiter: rate.NewLimiter(rate.Every(10*time.Millisecond), 1),
-		backoff:     10 * time.Millisecond,
-		maxBackoff:  100 * time.Millisecond,
-		maxTries:    5,
+		limiter:  NewLimiter(10*time.Millisecond, 100*time.Millisecond),
+		maxTries: 5,
 	}
 
 	numberOfThreads := 10
@@ -517,9 +505,7 @@ func TestRoundTripperRetryAfterSeconds(t *testing.T) {
 	}
 
 	settings := &NiceTransport{
-		rateLimiter: rate.NewLimiter(rate.Every(1*time.Millisecond), 1),
-		backoff:     1 * time.Millisecond,
-		maxBackoff:  1 * time.Millisecond,
+		limiter: NewLimiter(1*time.Millisecond, 1*time.Millisecond),
 	}
 
 	// test Clone while we are at it
@@ -563,8 +549,7 @@ func ExampleNiceTransportBuilder() {
 	transport, err := NewNiceTransportBuilder().
 		SetDefaultHeaders(headers).
 		SetUserAgent("your-user-agent-here/0.1").
-		SetRateLimit(1*time.Second, 1).
-		SetBackoff(1*time.Second, 120*time.Second).
+		SetRequestInterval(1*time.Second, 120*time.Second).
 		SetMaxTries(10).
 		SetDownstreamTransport(downstream).
 		Build()
