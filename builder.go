@@ -48,6 +48,13 @@ func (b *NiceTransportBuilder) SetDefaultHeaders(headers http.Header) *NiceTrans
 	return b
 }
 
+func (b *NiceTransportBuilder) SetLimiterBackoff(backoff Backoff) *NiceTransportBuilder {
+	b.limiter = &Limiter{
+		backoff: backoff.Clone(),
+	}
+	return b
+}
+
 func (b *NiceTransportBuilder) SetUserAgent(ua string) *NiceTransportBuilder {
 	b.defaultHeaders.Set("User-Agent", ua)
 	return b
@@ -81,13 +88,9 @@ func (b *NiceTransportBuilder) Build() (*NiceTransport, error) {
 	}
 
 	if b.limiter == nil {
-		if b.minWait <= 0 {
-			b.minWait = 1 * time.Second
+		b.limiter = &Limiter{
+			backoff: DefaultExponentialBackoff.Clone(),
 		}
-		if b.maxWait <= 0 {
-			b.maxWait = 120 * time.Second
-		}
-		b.limiter = NewLimiter(b.minWait, b.maxWait)
 	}
 
 	return &NiceTransport{

@@ -179,7 +179,9 @@ func parseRetryAfterHeader(resp *http.Response) time.Duration {
 			return time.Duration(secs) * time.Second
 		} else if t, err := http.ParseTime(val); err == nil {
 			return time.Until(t)
-		} // TODO: log unexpected
+		} else {
+			log.Printf("nicehttp: unexpected formatting of Retry-After value %q", val)
+		}
 	}
 	return 0
 }

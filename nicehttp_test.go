@@ -101,11 +101,12 @@ func createClientWithEndpoint(settings *NiceTransport, endpoint *MockEndpoint) *
 func TestRoundTripperFirstRun(t *testing.T) {
 	// context with deadline set
 	// limiter wait with context expires
+	backoff := NewExponentialBackoff(100*time.Millisecond, 1*time.Second, DefaultExponentialBackoffCoefficients)
 	settings := NiceTransport{
 		defaultHeaders: http.Header{
 			"Empty-Header": []string{}, // test headers with empty value list
 		},
-		limiter:  NewLimiter(100*time.Millisecond, 1*time.Second),
+		limiter:  NewLimiter(backoff),
 		maxTries: 5,
 	}
 
@@ -185,7 +186,9 @@ func TestRoundTripperSecondRun(t *testing.T) {
 	// reaches maxretries
 	// backoff max reached limiting
 	settings := NiceTransport{
-		limiter:  NewLimiter(10*time.Millisecond, 30*time.Millisecond),
+		limiter: &Limiter{
+			backoff: NewExponentialBackoff(10*time.Millisecond, 30*time.Millisecond, DefaultExponentialBackoffCoefficients),
+		},
 		maxTries: 5,
 	}
 
@@ -319,7 +322,9 @@ func TestRoundTripperFourthRun(t *testing.T) {
 	// 	}
 
 	settings := NiceTransport{
-		limiter:        NewLimiter(1*time.Millisecond, 1*time.Millisecond),
+		limiter: &Limiter{
+			backoff: NewExponentialBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultExponentialBackoffCoefficients),
+		},
 		maxTries:       5,
 		defaultHeaders: map[string][]string{"Some-Header": {}},
 	}
@@ -381,7 +386,9 @@ func TestRoundTripperFourthRun(t *testing.T) {
 
 func TestRoundTripperMultithread(t *testing.T) {
 	settings := NiceTransport{
-		limiter:  NewLimiter(10*time.Millisecond, 100*time.Millisecond),
+		limiter: &Limiter{
+			backoff: NewExponentialBackoff(10*time.Millisecond, 100*time.Millisecond, DefaultExponentialBackoffCoefficients),
+		},
 		maxTries: 5,
 	}
 
@@ -505,7 +512,9 @@ func TestRoundTripperRetryAfterSeconds(t *testing.T) {
 	}
 
 	settings := &NiceTransport{
-		limiter: NewLimiter(1*time.Millisecond, 1*time.Millisecond),
+		limiter: &Limiter{
+			backoff: NewExponentialBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultExponentialBackoffCoefficients),
+		},
 	}
 
 	// test Clone while we are at it
@@ -546,11 +555,20 @@ func ExampleNiceTransportBuilder() {
 	//     InsecureSkipVerify: true, // Skip certificate verification
 	// }
 
+	backoff := DefaultExponentialBackoff
+	// backoff = NewExponentialBackoff(1*time.Second, 120*time.Second, DefaultExponentialBackoffCoefficients)
+	// backoff = NewExponentialBackoff(1*time.Second, 120*time.Second, ExponentialBackoffCoefficients{
+	// 	   Success: 0.5,
+	// 	   Fail:    1.5,
+	// 	   Jitter:  0.3,
+	// })
+
 	transport, err := NewNiceTransportBuilder().
 		SetDefaultHeaders(headers).
 		SetUserAgent("your-user-agent-here/0.1").
 		SetRequestInterval(1*time.Second, 120*time.Second).
 		SetMaxTries(10).
+		SetLimiterBackoff(backoff).
 		SetDownstreamTransport(downstream).
 		Build()
 	if err != nil {
