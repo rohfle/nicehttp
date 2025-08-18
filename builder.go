@@ -9,7 +9,7 @@ import (
 type NiceTransportBuilder struct {
 	defaultHeaders      http.Header
 	attemptTimeout      time.Duration
-	maxTries            int
+	maxAttempts         int
 	downstreamTransport http.RoundTripper
 	limiter             *Limiter
 }
@@ -24,7 +24,7 @@ func NewNiceTransportBuilder() *NiceTransportBuilder {
 // Set sets values of the builder from an existing NiceTransport
 func (b *NiceTransportBuilder) Set(settings *NiceTransport) *NiceTransportBuilder {
 	b.SetDefaultHeaders(settings.defaultHeaders)
-	b.SetMaxTries(settings.maxTries)
+	b.SetMaxAttempts(settings.maxAttempts)
 	b.SetDownstreamTransport(settings.downstreamTransport)
 	b.SetAttemptTimeout(settings.attemptTimeout)
 	b.limiter = nil
@@ -76,9 +76,9 @@ func (b *NiceTransportBuilder) SetUserAgent(ua string) *NiceTransportBuilder {
 	return b
 }
 
-// SetMaxTries sets the maximum number of request attempts that will be made
-func (b *NiceTransportBuilder) SetMaxTries(n int) *NiceTransportBuilder {
-	b.maxTries = n
+// SetMaxAttempts sets the maximum number of request attempts that will be made
+func (b *NiceTransportBuilder) SetMaxAttempts(n int) *NiceTransportBuilder {
+	b.maxAttempts = n
 	return b
 }
 
@@ -91,8 +91,8 @@ func (b *NiceTransportBuilder) SetDownstreamTransport(rt http.RoundTripper) *Nic
 // Build creates a NiceTransport with settings given previously combined with defaults.
 func (b *NiceTransportBuilder) Build() (*NiceTransport, error) {
 	// Set defaults
-	if b.maxTries <= 0 {
-		b.maxTries = 10
+	if b.maxAttempts <= 0 {
+		b.maxAttempts = 10
 	}
 	if b.downstreamTransport == nil {
 		transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -106,7 +106,7 @@ func (b *NiceTransportBuilder) Build() (*NiceTransport, error) {
 
 	return &NiceTransport{
 		defaultHeaders:      b.defaultHeaders,
-		maxTries:            b.maxTries,
+		maxAttempts:         b.maxAttempts,
 		attemptTimeout:      b.attemptTimeout,
 		limiter:             b.limiter,
 		downstreamTransport: b.downstreamTransport,

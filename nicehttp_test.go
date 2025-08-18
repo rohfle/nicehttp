@@ -106,8 +106,8 @@ func TestRoundTripperFirstRun(t *testing.T) {
 		defaultHeaders: http.Header{
 			"Empty-Header": []string{}, // test headers with empty value list
 		},
-		limiter:  NewLimiter(backoff),
-		maxTries: 5,
+		limiter:     NewLimiter(backoff),
+		maxAttempts: 5,
 	}
 
 	expectedBody := "This is the body"
@@ -189,7 +189,7 @@ func TestRoundTripperSecondRun(t *testing.T) {
 		limiter: &Limiter{
 			backoff: NewExponentialBackoff(10*time.Millisecond, 30*time.Millisecond, DefaultExponentialBackoffCoefficients),
 		},
-		maxTries: 5,
+		maxAttempts: 5,
 	}
 
 	expectedBody := "This is the body"
@@ -255,7 +255,7 @@ func TestRoundTripperThirdRun(t *testing.T) {
 	backoff := NewExponentialBackoff(500*time.Millisecond, 500*time.Millisecond, DefaultExponentialBackoffCoefficients)
 	settings, err := NewNiceTransportBuilder().
 		SetLimiterBackoff(backoff).
-		SetMaxTries(5).Build()
+		SetMaxAttempts(5).Build()
 	if err != nil {
 		t.Fatalf("while building settings: %s", err)
 	}
@@ -322,7 +322,7 @@ func TestRoundTripperFourthRun(t *testing.T) {
 		limiter: &Limiter{
 			backoff: NewExponentialBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultExponentialBackoffCoefficients),
 		},
-		maxTries:       5,
+		maxAttempts:    5,
 		defaultHeaders: map[string][]string{"Some-Header": {}},
 	}
 
@@ -386,7 +386,7 @@ func TestRoundTripperMultithread(t *testing.T) {
 		limiter: &Limiter{
 			backoff: NewExponentialBackoff(10*time.Millisecond, 100*time.Millisecond, DefaultExponentialBackoffCoefficients),
 		},
-		maxTries: 5,
+		maxAttempts: 5,
 	}
 
 	numberOfThreads := 10
@@ -563,7 +563,7 @@ func ExampleNiceTransportBuilder() {
 	transport, err := NewNiceTransportBuilder().
 		SetDefaultHeaders(headers).
 		SetUserAgent("your-user-agent-here/0.1").
-		SetMaxTries(10).
+		SetMaxAttempts(10).
 		SetAttemptTimeout(120 * time.Second).
 		SetLimiterBackoff(backoff).
 		SetDownstreamTransport(downstream).

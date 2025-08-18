@@ -53,7 +53,7 @@ type NiceTransport struct {
 	// Include headers like "User-Agent" and "Authorization" here
 	defaultHeaders http.Header
 	// Number of times to retry the request on failure
-	maxTries int
+	maxAttempts int
 	// Timeout for a single connection attempt, after which the request
 	// will be retried. This is part of the total request time, which is
 	// controlled by the http.Client timeout.
@@ -70,7 +70,7 @@ type NiceTransport struct {
 func (s *NiceTransport) Clone() *NiceTransport {
 	var snew NiceTransport
 	snew.defaultHeaders = s.defaultHeaders.Clone()
-	snew.maxTries = s.maxTries
+	snew.maxAttempts = s.maxAttempts
 	snew.downstreamTransport = s.downstreamTransport
 	if s.limiter != nil {
 		snew.limiter = s.limiter.Clone()
@@ -148,7 +148,7 @@ func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error
 
 	attempt := 0
 	for {
-		// This loop will run up to rt.maxTries times
+		// This loop will run up to rt.maxAttempts times
 		attempt += 1
 
 		if rt.attemptTimeout != 0 {
@@ -175,7 +175,7 @@ func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error
 		retryAfter := parseRetryAfterHeader(resp)
 		rt.limiter.Done(needsRetry, retryAfter)
 
-		if attempt >= rt.maxTries || !needsRetry {
+		if attempt >= rt.maxAttempts || !needsRetry {
 			// The request either succeeded or failed with an http status that cannot be retried
 			// Or the retry limit has been reached so return the response and error no matter what
 			// Return the response and error to the caller
