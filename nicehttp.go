@@ -4,8 +4,10 @@ package nicehttp
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"runtime/debug"
 	"strconv"
@@ -30,6 +32,7 @@ func getVersion() string {
 	return "unknown"
 }
 
+var InfiniteTimeout time.Duration = 0
 var DefaultUserAgent = fmt.Sprintf("nicehttp/%s", getVersion())
 
 type readSeekCloser struct {
@@ -51,6 +54,12 @@ type NiceTransport struct {
 	defaultHeaders http.Header
 	// Number of times to retry the request on failure
 	maxTries int
+	// Timeout for a single connection attempt, after which the request
+	// will be retried. This is part of the total request time, which is
+	// controlled by the http.Client timeout.
+
+	// A value of 0 means no timeout.
+	attemptTimeout time.Duration
 	// downstreamTransport allows override of downstream roundtripper
 	// Not specifying a value means http.DefaultTransport will be used
 	downstreamTransport http.RoundTripper
@@ -133,17 +142,27 @@ func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error
 		}
 	}
 
-	tries := 0
+	origCtx := origReq.Context()
+	ctx := origCtx
+	var cancelAttemptCtx context.CancelFunc = func() {}
+
+	attempt := 0
 	for {
 		// This loop will run up to rt.maxTries times
-		tries += 1
+		attempt += 1
+
+		if rt.attemptTimeout != 0 {
+			// For each attempt create a context with attempt timeout
+			ctx, cancelAttemptCtx = context.WithTimeout(origCtx, rt.attemptTimeout)
+		}
 
 		// The request must be cloned each time it is sent
-		req := origReq.Clone(origReq.Context())
+		req := origReq.Clone(ctx)
 
 		// Wait patiently for the limiter before sending the request
-		if err := rt.limiter.Wait(req.Context()); err != nil {
+		if err := rt.limiter.Wait(ctx); err != nil {
 			// Context is cancelled or has exceeded deadline
+			cancelAttemptCtx()
 			return nil, err
 		}
 
@@ -151,11 +170,12 @@ func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error
 		// but this is handled by the io.NopCloser wrapper so retrying is possible
 		resp, err := rt.downstreamTransport.RoundTrip(req)
 
+		cancelAttemptCtx()
 		needsRetry := shouldRetryRequest(resp, err)
 		retryAfter := parseRetryAfterHeader(resp)
 		rt.limiter.Done(needsRetry, retryAfter)
 
-		if tries >= rt.maxTries || !needsRetry {
+		if attempt >= rt.maxTries || !needsRetry {
 			// The request either succeeded or failed with an http status that cannot be retried
 			// Or the retry limit has been reached so return the response and error no matter what
 			// Return the response and error to the caller

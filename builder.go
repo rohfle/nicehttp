@@ -10,6 +10,7 @@ type NiceTransportBuilder struct {
 	defaultHeaders      http.Header
 	minWait             time.Duration
 	maxWait             time.Duration
+	attemptTimeout      time.Duration
 	maxTries            int
 	downstreamTransport http.RoundTripper
 	limiter             *Limiter
@@ -27,6 +28,7 @@ func (b *NiceTransportBuilder) Set(settings *NiceTransport) *NiceTransportBuilde
 	b.SetDefaultHeaders(settings.defaultHeaders)
 	b.SetMaxTries(settings.maxTries)
 	b.SetDownstreamTransport(settings.downstreamTransport)
+	b.SetAttemptTimeout(settings.attemptTimeout)
 	b.SetRequestInterval(b.minWait, b.maxWait)
 	b.limiter = nil
 	if settings.limiter != nil {
@@ -52,6 +54,16 @@ func (b *NiceTransportBuilder) SetLimiterBackoff(backoff Backoff) *NiceTransport
 	b.limiter = &Limiter{
 		backoff: backoff.Clone(),
 	}
+	return b
+}
+
+// SetAttemptTimeout sets timeout for a single connection attempt,
+// after which the request will be retried. This is part of the total
+// request time, which is controlled by the http.Client timeout.
+
+// A value of 0 means no timeout.
+func (b *NiceTransportBuilder) SetAttemptTimeout(timeout time.Duration) *NiceTransportBuilder {
+	b.attemptTimeout = timeout
 	return b
 }
 
@@ -86,7 +98,6 @@ func (b *NiceTransportBuilder) Build() (*NiceTransport, error) {
 		transport := http.DefaultTransport.(*http.Transport).Clone()
 		b.downstreamTransport = transport
 	}
-
 	if b.limiter == nil {
 		b.limiter = &Limiter{
 			backoff: DefaultExponentialBackoff.Clone(),
@@ -96,6 +107,7 @@ func (b *NiceTransportBuilder) Build() (*NiceTransport, error) {
 	return &NiceTransport{
 		defaultHeaders:      b.defaultHeaders,
 		maxTries:            b.maxTries,
+		attemptTimeout:      b.attemptTimeout,
 		limiter:             b.limiter,
 		downstreamTransport: b.downstreamTransport,
 	}, nil

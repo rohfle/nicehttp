@@ -29,11 +29,21 @@ func main() {
 	//     InsecureSkipVerify: true, // Skip certificate verification
 	// }
 
+	backoff := DefaultExponentialBackoff
+	// backoff = NewExponentialBackoff(1*time.Second, 120*time.Second, DefaultExponentialBackoffCoefficients)
+	// backoff = NewExponentialBackoff(1*time.Second, 120*time.Second, ExponentialBackoffCoefficients{
+	// 	   Success: 0.5,
+	// 	   Fail:    1.5,
+	// 	   Jitter:  0.3,
+	// })
+
 	transport, err := NewNiceTransportBuilder().
 		SetDefaultHeaders(headers).
 		SetUserAgent("your-user-agent-here/0.1").
 		SetRequestInterval(1*time.Second, 120*time.Second).
 		SetMaxTries(10).
+		SetAttemptTimeout(120 * time.Second).
+		SetLimiterBackoff(backoff).
 		SetDownstreamTransport(downstream).
 		Build()
 	if err != nil {
