@@ -40,7 +40,6 @@ func main() {
 	transport, err := NewNiceTransportBuilder().
 		SetDefaultHeaders(headers).
 		SetUserAgent("your-user-agent-here/0.1").
-		SetRequestInterval(1*time.Second, 120*time.Second).
 		SetMaxTries(10).
 		SetAttemptTimeout(120 * time.Second).
 		SetLimiterBackoff(backoff).

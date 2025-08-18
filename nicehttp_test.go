@@ -252,12 +252,9 @@ func TestRoundTripperSecondRun(t *testing.T) {
 
 func TestRoundTripperThirdRun(t *testing.T) {
 	// deadline around 0.5 * RequestInterval
-	// if err = rt.limiter.Wait(req.Context()); err != nil {
-	// 	return nil, err
-	// }
-
+	backoff := NewExponentialBackoff(500*time.Millisecond, 500*time.Millisecond, DefaultExponentialBackoffCoefficients)
 	settings, err := NewNiceTransportBuilder().
-		SetRequestInterval(500*time.Millisecond, 500*time.Millisecond).
+		SetLimiterBackoff(backoff).
 		SetMaxTries(5).Build()
 	if err != nil {
 		t.Fatalf("while building settings: %s", err)
@@ -566,7 +563,6 @@ func ExampleNiceTransportBuilder() {
 	transport, err := NewNiceTransportBuilder().
 		SetDefaultHeaders(headers).
 		SetUserAgent("your-user-agent-here/0.1").
-		SetRequestInterval(1*time.Second, 120*time.Second).
 		SetMaxTries(10).
 		SetAttemptTimeout(120 * time.Second).
 		SetLimiterBackoff(backoff).
