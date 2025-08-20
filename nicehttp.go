@@ -32,7 +32,7 @@ func getVersion() string {
 	return "unknown"
 }
 
-var InfiniteTimeout time.Duration = 0
+var NoTimeout time.Duration = 0
 var DefaultUserAgent = fmt.Sprintf("nicehttp/%s", getVersion())
 
 type readSeekCloser struct {
@@ -146,12 +146,22 @@ func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error
 	ctx := origCtx
 	var cancelAttemptCtx context.CancelFunc = func() {}
 
+	// maxAttempts and attemptTimeout can be overridden per request through context
+	maxAttempts := rt.maxAttempts
+	if val, ok := GetMaxAttemptsFromContext(ctx); ok {
+		maxAttempts = val
+	}
+	attemptTimeout := rt.attemptTimeout
+	if val, ok := GetAttemptTimeoutFromContext(ctx); ok {
+		attemptTimeout = val
+	}
+
 	attempt := 0
 	for {
-		// This loop will run up to rt.maxAttempts times
+		// This loop will run up to maxAttempts times
 		attempt += 1
 
-		if rt.attemptTimeout != 0 {
+		if attemptTimeout != NoTimeout {
 			// For each attempt create a context with attempt timeout
 			ctx, cancelAttemptCtx = context.WithTimeout(origCtx, rt.attemptTimeout)
 		}
@@ -175,7 +185,7 @@ func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error
 		retryAfter := parseRetryAfterHeader(resp)
 		rt.limiter.Done(needsRetry, retryAfter)
 
-		if attempt >= rt.maxAttempts || !needsRetry {
+		if attempt >= maxAttempts || !needsRetry {
 			// The request either succeeded or failed with an http status that cannot be retried
 			// Or the retry limit has been reached so return the response and error no matter what
 			// Return the response and error to the caller

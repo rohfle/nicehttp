@@ -579,7 +579,15 @@ func ExampleNiceTransportBuilder() {
 		// Timeout:
 	}
 
-	resp, err := client.Get(server.URL)
+	ctx := SetAttemptTimeoutInContext(context.Background(), 5*time.Second)
+	ctx = SetMaxAttemptsInContext(ctx, 5)
+	req, err := http.NewRequestWithContext(ctx, "GET", server.URL, nil)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		fmt.Println("error:", err)
 		return
