@@ -29,15 +29,14 @@ func main() {
 	//     InsecureSkipVerify: true, // Skip certificate verification
 	// }
 
-	backoff := DefaultExponentialBackoff
-	// backoff = NewExponentialBackoff(1*time.Second, 120*time.Second, DefaultExponentialBackoffCoefficients)
-	// backoff = NewExponentialBackoff(1*time.Second, 120*time.Second, ExponentialBackoffCoefficients{
+	backoff := nicehttp.NewExponentialBackoff(1*time.Second, 120*time.Second, nicehttp.DefaultExponentialBackoffCoefficients)
+	// backoff := nicehttp.NewExponentialBackoff(1*time.Second, 120*time.Second, nicehttp.ExponentialBackoffCoefficients{
 	// 	   Success: 0.5,
 	// 	   Fail:    1.5,
 	// 	   Jitter:  0.3,
 	// })
 
-	transport, err := NewNiceTransportBuilder().
+	transport, err := nicehttp.NewNiceTransportBuilder().
 		SetDefaultHeaders(headers).
 		SetUserAgent("your-user-agent-here/0.1").
 		SetMaxAttempts(10).
@@ -56,7 +55,15 @@ func main() {
 		// Timeout:
 	}
 
-	resp, err := client.Get(server.URL)
+	ctx := nicehttp.SetAttemptTimeoutInContext(context.Background(), 5*time.Second)
+	ctx = nicehttp.SetMaxAttemptsInContext(ctx, 5)
+	req, err := http.NewRequestWithContext(ctx, "GET", server.URL, nil)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		fmt.Println("error:", err)
 		return

@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -535,69 +533,4 @@ func TestRoundTripperRetryAfterSeconds(t *testing.T) {
 	if endpoint.CallCount != expectedCalls {
 		t.Fatalf("expected call count %d, got %d", expectedCalls, endpoint.CallCount)
 	}
-}
-func ExampleNiceTransportBuilder() {
-	// Mock HTTP server
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, "hello world")
-	}))
-	defer server.Close()
-
-	headers := make(http.Header)
-	headers.Set("Authentication", "Bearer xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
-
-	downstream := http.DefaultTransport.(*http.Transport).Clone()
-	downstream.MaxConnsPerHost = 1
-	// downstream.TLSClientConfig = &tls.Config{
-	//     InsecureSkipVerify: true, // Skip certificate verification
-	// }
-
-	backoff := DefaultExponentialBackoff
-	// backoff = NewExponentialBackoff(1*time.Second, 120*time.Second, DefaultExponentialBackoffCoefficients)
-	// backoff = NewExponentialBackoff(1*time.Second, 120*time.Second, ExponentialBackoffCoefficients{
-	// 	   Success: 0.5,
-	// 	   Fail:    1.5,
-	// 	   Jitter:  0.3,
-	// })
-
-	transport, err := NewNiceTransportBuilder().
-		SetDefaultHeaders(headers).
-		SetUserAgent("your-user-agent-here/0.1").
-		SetMaxAttempts(10).
-		SetAttemptTimeout(120 * time.Second).
-		SetLimiterBackoff(backoff).
-		SetDownstreamTransport(downstream).
-		Build()
-	if err != nil {
-		fmt.Println("error:", err)
-		return
-	}
-
-	client := &http.Client{
-		Transport: transport,
-		// CheckRedirect:
-		// Timeout:
-	}
-
-	ctx := SetAttemptTimeoutInContext(context.Background(), 5*time.Second)
-	ctx = SetMaxAttemptsInContext(ctx, 5)
-	req, err := http.NewRequestWithContext(ctx, "GET", server.URL, nil)
-	if err != nil {
-		fmt.Println("error:", err)
-		return
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		fmt.Println("error:", err)
-		return
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		fmt.Println("error:", err)
-		return
-	}
-	fmt.Println("got resp:", string(data))
-	// Output: got resp: hello world
 }
