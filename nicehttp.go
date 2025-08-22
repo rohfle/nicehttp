@@ -144,7 +144,7 @@ func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error
 
 	origCtx := origReq.Context()
 	ctx := origCtx
-	var cancelAttemptCtx context.CancelFunc = func() {}
+	var cancelAttemptCtx context.CancelFunc = nil //func() {}
 
 	// maxAttempts and attemptTimeout can be overridden per request through context
 	maxAttempts := rt.maxAttempts
@@ -161,39 +161,41 @@ func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error
 		// This loop will run up to maxAttempts times
 		attempt += 1
 
+		// Wait patiently for the limiter before sending the request up to the context deadline
+		if err := rt.limiter.Wait(origCtx); err != nil {
+			// The original context is cancelled or has exceeded deadline
+			return nil, err
+		}
+
 		if attemptTimeout != NoTimeout {
-			// For each attempt create a context with attempt timeout
+			// If an attempt timeout is set, create a context with attempt timeout for each request
 			ctx, cancelAttemptCtx = context.WithTimeout(origCtx, rt.attemptTimeout)
 		}
 
 		// The request must be cloned each time it is sent
 		req := origReq.Clone(ctx)
 
-		// Wait patiently for the limiter before sending the request
-		if err := rt.limiter.Wait(ctx); err != nil {
-			// Context is cancelled or has exceeded deadline
-			cancelAttemptCtx()
-			return nil, err
-		}
-
-		// Sending request using downstream roundtripper tries to close req.Body
-		// but this is handled by the io.NopCloser wrapper so retrying is possible
+		// Send request using downstream roundtripper
+		// This call usually closes req.Body, but the io.NopCloser code above prevents this
 		resp, err := rt.downstreamTransport.RoundTrip(req)
 
-		cancelAttemptCtx()
+		// Post request cleanup
+		if cancelAttemptCtx != nil {
+			cancelAttemptCtx()
+		}
+		// Determine if the request should be retried
 		needsRetry := shouldRetryRequest(resp, err)
 		retryAfter := parseRetryAfterHeader(resp)
 		rt.limiter.Done(needsRetry, retryAfter)
 
 		if attempt >= maxAttempts || !needsRetry {
-			// The request either succeeded or failed with an http status that cannot be retried
-			// Or the retry limit has been reached so return the response and error no matter what
-			// Return the response and error to the caller
+			// The request either succeeded, failed with an http status that cannot be retried,
+			// or the retry limit was reached. Return the response and error to the caller.
 			return resp, err
 		}
 
-		// Rewind the body to the start on retries when body is not nil
 		if bodySeeker != nil {
+			// Rewind the body to the start on retry
 			bodySeeker.Seek(0, io.SeekStart)
 		}
 	}

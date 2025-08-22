@@ -34,10 +34,17 @@ func (rl *Limiter) Wait(ctx context.Context) error {
 		return err
 	}
 
-	wait := rl.backoff.Next()
+	wait := rl.backoff.UntilNext()
 	if wait <= 0 {
 		// Enough time has passed since last request - proceed
 		return nil
+	}
+
+	// If the wait is longer than the remaining deadline of the ctx,
+	// it better to simulate an DeadlineExceeded now.
+	if deadline, ok := ctx.Deadline(); ok && deadline.Before(rl.backoff.Next()) {
+		rl.mu.Unlock()
+		return context.DeadlineExceeded
 	}
 
 	select {
