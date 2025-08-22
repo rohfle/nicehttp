@@ -51,8 +51,8 @@ func main() {
 
 	client := &http.Client{
 		Transport: transport,
+		Timeout:   10 * time.Minute,
 		// CheckRedirect:
-		// Timeout:
 	}
 
 	ctx := nicehttp.SetAttemptTimeoutInContext(context.Background(), 5*time.Second)
