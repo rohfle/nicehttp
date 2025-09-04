@@ -34,6 +34,8 @@ func getVersion() string {
 
 var NoTimeout time.Duration = 0
 var DefaultUserAgent = fmt.Sprintf("nicehttp/%s", getVersion())
+var DefaultAttemptTimeout time.Duration = 0
+var DefaultMaxAttempts = 10
 
 type readSeekCloser struct {
 	*bytes.Reader

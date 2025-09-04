@@ -92,7 +92,10 @@ func (b *NiceTransportBuilder) SetDownstreamTransport(rt http.RoundTripper) *Nic
 func (b *NiceTransportBuilder) Build() (*NiceTransport, error) {
 	// Set defaults
 	if b.maxAttempts <= 0 {
-		b.maxAttempts = 10
+		b.maxAttempts = DefaultMaxAttempts
+	}
+	if b.attemptTimeout <= 0 {
+		b.attemptTimeout = DefaultAttemptTimeout
 	}
 	if b.downstreamTransport == nil {
 		transport := http.DefaultTransport.(*http.Transport).Clone()
