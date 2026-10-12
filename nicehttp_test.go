@@ -534,3 +534,76 @@ func TestRoundTripperRetryAfterSeconds(t *testing.T) {
 		t.Fatalf("expected call count %d, got %d", expectedCalls, endpoint.CallCount)
 	}
 }
+
+func TestRoundTripperAttemptTimeoutOverride(t *testing.T) {
+	// Deadline observed by the endpoint on each call
+	deadlines := make(chan time.Duration, 16)
+
+	endpoint := &MockEndpoint{
+		CallCount: 0,
+		Start:     time.Time{},
+		Timings:   nil,
+		Deadline:  time.Time{},
+		Handler: func(endpoint *MockEndpoint, callCount int, req *http.Request) (*http.Response, error) {
+			if deadline, hasDeadline := req.Context().Deadline(); hasDeadline {
+				deadlines <- time.Until(deadline)
+			} else {
+				deadlines <- 0
+			}
+			// Behave like a real transport and abort the attempt once the context is done
+			select {
+			case <-req.Context().Done():
+				return nil, req.Context().Err()
+			default:
+			}
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader("OK")),
+				Header:     make(http.Header),
+			}, nil
+		},
+	}
+
+	backoff := NewExponentialBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultExponentialBackoffCoefficients)
+
+	// No attempt timeout in the transport, so the context value must be used
+	settings := NiceTransport{
+		limiter:     NewLimiter(backoff),
+		maxAttempts: 2,
+	}
+	client := createClientWithEndpoint(&settings, endpoint)
+
+	ctx := SetAttemptTimeoutInContext(context.Background(), 2*time.Second)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://example.com", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequestWithContext failed: %s", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("expected 200 response using attempt timeout from context, got error: %s", err)
+	}
+	resp.Body.Close()
+
+	if observed := <-deadlines; observed < time.Second || observed > 3*time.Second {
+		t.Fatalf("expected attempt deadline of about 2s from context override, got %s", observed)
+	}
+
+	// Attempt timeout in the transport is longer than the context value, which must win
+	settings.attemptTimeout = 30 * time.Second
+	client = createClientWithEndpoint(&settings, endpoint)
+
+	ctx = SetAttemptTimeoutInContext(context.Background(), 100*time.Millisecond)
+	req, err = http.NewRequestWithContext(ctx, http.MethodGet, "http://example.com", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequestWithContext failed: %s", err)
+	}
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("expected 200 response using attempt timeout from context, got error: %s", err)
+	}
+	resp.Body.Close()
+
+	if observed := <-deadlines; observed < 50*time.Millisecond || observed > time.Second {
+		t.Fatalf("expected attempt deadline of about 100ms from context override, got %s", observed)
+	}
+}

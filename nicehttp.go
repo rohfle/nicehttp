@@ -171,7 +171,7 @@ func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error
 
 		if attemptTimeout != NoTimeout {
 			// If an attempt timeout is set, create a context with attempt timeout for each request
-			ctx, cancelAttemptCtx = context.WithTimeout(origCtx, rt.attemptTimeout)
+			ctx, cancelAttemptCtx = context.WithTimeout(origCtx, attemptTimeout)
 		}
 
 		// The request must be cloned each time it is sent
