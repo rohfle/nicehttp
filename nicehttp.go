@@ -50,6 +50,30 @@ func newReadSeekCloser(b []byte) io.ReadSeekCloser {
 	return readSeekCloser{bytes.NewReader(b)}
 }
 
+// cancelOnCloseBody cancels the attempt context once the response body has been
+// fully read or closed. The attempt context is tied to the response body by the
+// downstream roundtripper, so cancelling it while the caller is still reading
+// aborts the read.
+type cancelOnCloseBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *cancelOnCloseBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err != nil {
+		// The body is finished (or broken), so the attempt can be cancelled
+		b.cancel()
+	}
+	return n, err
+}
+
+func (b *cancelOnCloseBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.cancel()
+	return err
+}
+
 type NiceTransport struct {
 	// Headers added to every request
 	// Include headers like "User-Agent" and "Authorization" here
@@ -59,7 +83,9 @@ type NiceTransport struct {
 	// Timeout for a single connection attempt, after which the request
 	// will be retried. This is part of the total request time, which is
 	// controlled by the http.Client timeout.
-
+	// The attempt stays active until the response body has been read or
+	// closed, so the timeout also limits how long the caller may spend
+	// reading the body.
 	// A value of 0 means no timeout.
 	attemptTimeout time.Duration
 	// downstreamTransport allows override of downstream roundtripper
@@ -181,10 +207,6 @@ func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error
 		// This call usually closes req.Body, but the io.NopCloser code above prevents this
 		resp, err := rt.downstreamTransport.RoundTrip(req)
 
-		// Post request cleanup
-		if cancelAttemptCtx != nil {
-			cancelAttemptCtx()
-		}
 		// Determine if the request should be retried
 		needsRetry := shouldRetryRequest(resp, err)
 		retryAfter := parseRetryAfterHeader(resp)
@@ -193,7 +215,22 @@ func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error
 		if attempt >= maxAttempts || !needsRetry {
 			// The request either succeeded, failed with an http status that cannot be retried,
 			// or the retry limit was reached. Return the response and error to the caller.
+			if cancelAttemptCtx != nil {
+				if resp != nil && resp.Body != nil {
+					// The attempt context controls the response body, so it is handed
+					// over to the caller and cancelled when the body is done
+					resp.Body = &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancelAttemptCtx}
+				} else {
+					cancelAttemptCtx()
+				}
+			}
 			return resp, err
+		}
+
+		// The response of this attempt is discarded by the retry,
+		// so the attempt can be cancelled now
+		if cancelAttemptCtx != nil {
+			cancelAttemptCtx()
 		}
 
 		if bodySeeker != nil {

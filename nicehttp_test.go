@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -605,5 +606,43 @@ func TestRoundTripperAttemptTimeoutOverride(t *testing.T) {
 
 	if observed := <-deadlines; observed < 50*time.Millisecond || observed > time.Second {
 		t.Fatalf("expected attempt deadline of about 100ms from context override, got %s", observed)
+	}
+}
+
+func TestRoundTripperAttemptTimeoutBodyRead(t *testing.T) {
+	// The body arrives only after the response headers, like any streamed or
+	// large response. Reading it must not be aborted by the attempt timeout.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "5")
+		w.WriteHeader(200)
+		w.(http.Flusher).Flush()
+		time.Sleep(300 * time.Millisecond)
+		w.Write([]byte("hello"))
+	}))
+	defer server.Close()
+
+	// A 5 second attempt timeout is long enough that it never fires here, so a
+	// failure is caused by the attempt being cancelled as soon as the response
+	// headers have been received.
+	transport, err := NewNiceTransportBuilder().
+		SetAttemptTimeout(5 * time.Second).
+		Build()
+	if err != nil {
+		t.Fatalf("while building transport: %s", err)
+	}
+	client := &http.Client{Transport: transport}
+
+	resp, err := client.Get(server.URL)
+	if err != nil {
+		t.Fatalf("unexpected error while getting response headers: %s", err)
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("expected body to be readable after the response headers, got error: %s", err)
+	}
+	if string(data) != "hello" {
+		t.Fatalf("expected body %q, got %q", "hello", string(data))
 	}
 }
