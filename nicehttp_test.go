@@ -754,3 +754,71 @@ func TestRoundTripperCloneKeepsAttemptTimeout(t *testing.T) {
 		t.Fatalf("expected the clone to keep the 500ms attempt timeout, deadline observed was %s", observed)
 	}
 }
+
+func TestRoundTripperLimiterReleasedAfterPanic(t *testing.T) {
+	// The limiter is locked for the duration of an attempt, so a panic in the
+	// downstream roundtripper must not leave it locked. Otherwise every later
+	// request on this transport waits for a lock that is never released.
+	expectedCalls := 2
+
+	endpoint := &MockEndpoint{
+		CallCount: 0,
+		Start:     time.Time{},
+		Timings:   nil,
+		Deadline:  time.Time{},
+		Handler: func(endpoint *MockEndpoint, callCount int, req *http.Request) (*http.Response, error) {
+			if callCount == 1 {
+				panic("simulated panic in downstream roundtripper")
+			}
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader("OK")),
+				Header:     make(http.Header),
+			}, nil
+		},
+	}
+
+	settings := NiceTransport{
+		limiter: &Limiter{
+			backoff: NewExponentialBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultExponentialBackoffCoefficients),
+		},
+		maxAttempts: 1,
+	}
+	client := createClientWithEndpoint(&settings, endpoint)
+
+	// The first request takes the limiter, then panics while it is held
+	func() {
+		defer func() {
+			if recovered := recover(); recovered == nil {
+				t.Fatal("expected the downstream roundtripper to panic")
+			}
+		}()
+		resp, err := client.Get("http://example.com")
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
+
+	// The second request must not wait for the panic leaked lock
+	done := make(chan error, 1)
+	go func() {
+		resp, err := client.Get("http://example.com")
+		if err == nil {
+			resp.Body.Close()
+		}
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("expected 200 response on the request after the panic, got error: %s", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected the request after the panic to complete, the limiter is still locked")
+	}
+
+	if endpoint.CallCount != expectedCalls {
+		t.Fatalf("expected call count %d, got %d", expectedCalls, endpoint.CallCount)
+	}
+}
