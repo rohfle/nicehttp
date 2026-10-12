@@ -38,6 +38,9 @@ func (b *NiceTransportBuilder) Set(settings *NiceTransport) *NiceTransportBuilde
 // in each request. If this is called multiple times, then existing
 // keys will be overwritten.
 func (b *NiceTransportBuilder) SetDefaultHeaders(headers http.Header) *NiceTransportBuilder {
+	if b.defaultHeaders == nil {
+		b.defaultHeaders = make(http.Header)
+	}
 	for key, values := range headers {
 		b.defaultHeaders.Del(key)
 		if len(values) == 0 {
@@ -52,8 +55,13 @@ func (b *NiceTransportBuilder) SetDefaultHeaders(headers http.Header) *NiceTrans
 
 // SetLimiterBackoff sets the backoff for the limiter.
 
-// If this is not set, the DefaultExponentialBackoff will be used
+// If this is not set, or set to nil, the DefaultExponentialBackoff will be used
 func (b *NiceTransportBuilder) SetLimiterBackoff(backoff Backoff) *NiceTransportBuilder {
+	if backoff == nil {
+		// A nil backoff means the default backoff is used
+		b.limiter = nil
+		return b
+	}
 	b.limiter = &Limiter{
 		backoff: backoff.Clone(),
 	}
@@ -72,6 +80,9 @@ func (b *NiceTransportBuilder) SetAttemptTimeout(timeout time.Duration) *NiceTra
 
 // SetUserAgent sets the User-Agent in default headers
 func (b *NiceTransportBuilder) SetUserAgent(ua string) *NiceTransportBuilder {
+	if b.defaultHeaders == nil {
+		b.defaultHeaders = make(http.Header)
+	}
 	b.defaultHeaders.Set("User-Agent", ua)
 	return b
 }
@@ -91,6 +102,11 @@ func (b *NiceTransportBuilder) SetDownstreamTransport(rt http.RoundTripper) *Nic
 // Build creates a NiceTransport with settings given previously combined with defaults.
 func (b *NiceTransportBuilder) Build() (*NiceTransport, error) {
 	// Set defaults
+	if b.defaultHeaders == nil {
+		// The builder was not created by NewNiceTransportBuilder, so apply the
+		// default User-Agent here
+		b.defaultHeaders = http.Header{"User-Agent": {DefaultUserAgent}}
+	}
 	if b.maxAttempts <= 0 {
 		b.maxAttempts = DefaultMaxAttempts
 	}

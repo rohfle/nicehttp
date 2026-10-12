@@ -14,6 +14,10 @@ type Limiter struct {
 }
 
 func NewLimiter(backoff Backoff) *Limiter {
+	if backoff == nil {
+		// A nil backoff means the default backoff is used
+		backoff = DefaultExponentialBackoff.Clone()
+	}
 	return &Limiter{
 		backoff: backoff,
 	}

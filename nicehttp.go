@@ -113,10 +113,19 @@ func (s *NiceTransport) Clone() *NiceTransport {
 	return &snew
 }
 
+// downstream returns the transport that requests are sent to. Not specifying a
+// downstream transport means http.DefaultTransport is used.
+func (rt *NiceTransport) downstream() http.RoundTripper {
+	if rt.downstreamTransport == nil {
+		return http.DefaultTransport
+	}
+	return rt.downstreamTransport
+}
+
 // CloseIdleConnections closes idle connections in the downstream roundtripper.
 // It is called by http.Client.CloseIdleConnections.
 func (rt *NiceTransport) CloseIdleConnections() {
-	if closer, ok := rt.downstreamTransport.(interface{ CloseIdleConnections() }); ok {
+	if closer, ok := rt.downstream().(interface{ CloseIdleConnections() }); ok {
 		closer.CloseIdleConnections()
 	}
 }
@@ -148,6 +157,11 @@ func shouldRetryRequest(resp *http.Response, err error) bool {
 
 // RoundTrip is a custom implementation that handles backoff, error retries and done context
 func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error) {
+	if rt.limiter == nil {
+		// A transport without a limiter cannot back off between attempts
+		return nil, fmt.Errorf("nicehttp: transport has no limiter, create it with NewNiceTransportBuilder")
+	}
+
 	// in order to retry requests, we need io.Seeker to support rewinding the body
 	var bodySeeker io.ReadSeekCloser = nil
 	// the body might be nil for some methods (eg GET / HEAD)
@@ -255,7 +269,7 @@ func (rt *NiceTransport) roundTripAttempt(origCtx context.Context, origReq *http
 		}
 	}
 
-	resp, err = rt.downstreamTransport.RoundTrip(req)
+	resp, err = rt.downstream().RoundTrip(req)
 
 	// Determine if the request should be retried
 	needsRetry = shouldRetryRequest(resp, err)

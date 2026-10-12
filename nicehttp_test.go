@@ -932,3 +932,107 @@ func TestRoundTripperCloseIdleConnections(t *testing.T) {
 		t.Fatal("expected CloseIdleConnections to close the idle connection of the downstream transport")
 	}
 }
+
+func TestZeroValueBuilder(t *testing.T) {
+	// A builder that was not created by NewNiceTransportBuilder must still work
+	var builder NiceTransportBuilder
+
+	var sentHeader http.Header
+	endpoint := &MockEndpoint{
+		CallCount: 0,
+		Start:     time.Time{},
+		Timings:   nil,
+		Deadline:  time.Time{},
+		Handler: func(endpoint *MockEndpoint, callCount int, req *http.Request) (*http.Response, error) {
+			sentHeader = req.Header
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader("OK")),
+				Header:     make(http.Header),
+			}, nil
+		},
+	}
+
+	transport, err := builder.
+		SetUserAgent("zero-value-agent").
+		SetDefaultHeaders(http.Header{"X-Zero": {"zero"}}).
+		SetLimiterBackoff(nil).
+		SetMaxAttempts(1).
+		SetDownstreamTransport(&MockTransport{Endpoint: endpoint}).
+		Build()
+	if err != nil {
+		t.Fatalf("while building transport: %s", err)
+	}
+
+	resp, err := (&http.Client{Transport: transport}).Get("http://example.com")
+	if err != nil {
+		t.Fatal("expected 200 response, got unexpected error", err)
+	}
+	resp.Body.Close()
+
+	if userAgent := sentHeader.Get("User-Agent"); userAgent != "zero-value-agent" {
+		t.Fatalf("expected User-Agent %q, got %q", "zero-value-agent", userAgent)
+	}
+	if sent := sentHeader.Get("X-Zero"); sent != "zero" {
+		t.Fatalf("expected default header X-Zero %q, got %q", "zero", sent)
+	}
+
+	// A builder with no headers configured gets the default User-Agent
+	transport, err = (&NiceTransportBuilder{}).
+		SetMaxAttempts(1).
+		SetDownstreamTransport(&MockTransport{Endpoint: endpoint}).
+		Build()
+	if err != nil {
+		t.Fatalf("while building transport: %s", err)
+	}
+
+	resp, err = (&http.Client{Transport: transport}).Get("http://example.com")
+	if err != nil {
+		t.Fatal("expected 200 response, got unexpected error", err)
+	}
+	resp.Body.Close()
+
+	if userAgent := sentHeader.Get("User-Agent"); userAgent != DefaultUserAgent {
+		t.Fatalf("expected default User-Agent %q, got %q", DefaultUserAgent, userAgent)
+	}
+}
+
+func TestZeroValueTransport(t *testing.T) {
+	// An unconfigured transport must report an error instead of panicking
+	req, err := http.NewRequest(http.MethodGet, "http://example.com", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest failed: %s", err)
+	}
+	if _, err := (&NiceTransport{}).RoundTrip(req); err == nil {
+		t.Fatal("expected an error from a transport without a limiter")
+	}
+
+	// Not specifying a downstream transport means http.DefaultTransport is used
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "OK") //nolint:errcheck
+	}))
+	defer server.Close()
+
+	transport := NiceTransport{
+		limiter:     NewLimiter(nil), // a nil backoff means the default backoff is used
+		maxAttempts: 1,
+	}
+	resp, err := (&http.Client{Transport: &transport}).Get(server.URL)
+	if err != nil {
+		t.Fatal("expected 200 response, got unexpected error", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200 response but got status %d", resp.StatusCode)
+	}
+
+	// A per host transport without config must report an error instead of panicking
+	if _, err := (&NicePerHostTransport{}).RoundTrip(req); err == nil {
+		t.Fatal("expected an error from a per host transport without config")
+	}
+
+	var manager PerHostConfigManager
+	if _, err := manager.ForHost("example.com"); err == nil {
+		t.Fatal("expected an error from a per host config manager without defaults")
+	}
+}

@@ -78,6 +78,9 @@ func (c *PerHostConfig) CreateNiceTransport() (*NiceTransport, error) {
 }
 
 func (m *PerHostConfigManager) ForHost(host string) (*PerHostConfig, error) {
+	if m.Defaults == nil {
+		return nil, fmt.Errorf("no default per host config")
+	}
 	config, exists := m.Hosts[host]
 	if exists {
 		return config.Clone(), nil
@@ -100,6 +103,9 @@ func (t *NicePerHostTransport) ForHost(host string) (*NiceTransport, error) {
 	transport, err := config.CreateNiceTransport()
 	if err != nil {
 		return nil, fmt.Errorf("while creating transport for host %q: %w", host, err)
+	}
+	if t.transports == nil {
+		t.transports = make(map[string]*NiceTransport)
 	}
 	t.transports[host] = transport
 	return transport, nil
