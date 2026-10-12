@@ -822,3 +822,62 @@ func TestRoundTripperLimiterReleasedAfterPanic(t *testing.T) {
 		t.Fatalf("expected call count %d, got %d", expectedCalls, endpoint.CallCount)
 	}
 }
+
+func TestRoundTripperDefaultHeadersKeepRequestClean(t *testing.T) {
+	// Default headers are added to the request that is sent downstream, not to
+	// the request given by the caller, which may be reused or shared with
+	// other clients
+	var sentHeader http.Header
+
+	endpoint := &MockEndpoint{
+		CallCount: 0,
+		Start:     time.Time{},
+		Timings:   nil,
+		Deadline:  time.Time{},
+		Handler: func(endpoint *MockEndpoint, callCount int, req *http.Request) (*http.Response, error) {
+			sentHeader = req.Header
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader("OK")),
+				Header:     make(http.Header),
+			}, nil
+		},
+	}
+
+	settings := NiceTransport{
+		defaultHeaders: http.Header{"X-Default": {"default-value"}},
+		limiter: &Limiter{
+			backoff: NewExponentialBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultExponentialBackoffCoefficients),
+		},
+		maxAttempts: 1,
+	}
+	client := createClientWithEndpoint(&settings, endpoint)
+
+	req, err := http.NewRequest(http.MethodGet, "http://example.com", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest failed: %s", err)
+	}
+	req.Header.Set("X-Caller", "caller-value")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal("expected 200 response, got unexpected error", err)
+	}
+	resp.Body.Close()
+
+	if sent := sentHeader.Get("X-Default"); sent != "default-value" {
+		t.Fatalf("expected default header X-Default %q on the request sent downstream, got %q", "default-value", sent)
+	}
+	if sent := sentHeader.Get("User-Agent"); sent == "" {
+		t.Fatal("expected default User-Agent on the request sent downstream")
+	}
+	if sent := req.Header.Get("X-Default"); sent != "" {
+		t.Fatalf("expected default header X-Default to not be added to the caller's request, got %q", sent)
+	}
+	if sent := req.Header.Get("User-Agent"); sent != "" {
+		t.Fatalf("expected default User-Agent to not be added to the caller's request, got %q", sent)
+	}
+	if sent := req.Header.Get("X-Caller"); sent != "caller-value" {
+		t.Fatalf("expected the caller's own header to be kept on the caller's request, got %q", sent)
+	}
+}

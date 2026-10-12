@@ -167,20 +167,6 @@ func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error
 		}
 	}
 
-	// Set default headers (used for User-Agent and Authorization)
-	if len(rt.defaultHeaders) > 0 {
-		for key, values := range rt.defaultHeaders {
-			if len(origReq.Header[key]) > 0 {
-				// Header already exists with at least one value, do not replace with defaults
-				continue
-			}
-			// Support header keys with multiple values
-			for _, val := range values {
-				origReq.Header.Add(key, val)
-			}
-		}
-	}
-
 	origCtx := origReq.Context()
 
 	// maxAttempts and attemptTimeout can be overridden per request through context
@@ -241,6 +227,25 @@ func (rt *NiceTransport) roundTripAttempt(origCtx context.Context, origReq *http
 
 	// Clone the request with the attempt-specific context
 	req := origReq.Clone(ctx)
+
+	// Set default headers (used for User-Agent and Authorization) on the
+	// request sent downstream. The request given by the caller is left
+	// untouched, because it may be reused or shared with other clients
+	if len(rt.defaultHeaders) > 0 {
+		if req.Header == nil {
+			req.Header = make(http.Header)
+		}
+		for key, values := range rt.defaultHeaders {
+			if len(req.Header[key]) > 0 {
+				// Header already exists with at least one value, do not replace with defaults
+				continue
+			}
+			// Support header keys with multiple values
+			for _, val := range values {
+				req.Header.Add(key, val)
+			}
+		}
+	}
 
 	resp, err = rt.downstreamTransport.RoundTrip(req)
 
