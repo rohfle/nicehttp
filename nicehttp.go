@@ -105,6 +105,7 @@ func (s *NiceTransport) Clone() *NiceTransport {
 	var snew NiceTransport
 	snew.defaultHeaders = s.defaultHeaders.Clone()
 	snew.maxAttempts = s.maxAttempts
+	snew.attemptTimeout = s.attemptTimeout
 	snew.downstreamTransport = s.downstreamTransport
 	if s.limiter != nil {
 		snew.limiter = s.limiter.Clone()

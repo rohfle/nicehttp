@@ -709,3 +709,48 @@ func TestRoundTripperRetryWithConnectionLimit(t *testing.T) {
 		t.Fatalf("expected call count %d, got %d", expectedCalls, callCount)
 	}
 }
+
+func TestRoundTripperCloneKeepsAttemptTimeout(t *testing.T) {
+	// Cloning settings and passing them to the builder must keep the attempt
+	// timeout, otherwise retries lose their per-attempt deadline
+	deadlines := make(chan time.Duration, 4)
+
+	endpoint := &MockEndpoint{
+		CallCount: 0,
+		Start:     time.Time{},
+		Timings:   nil,
+		Deadline:  time.Time{},
+		Handler: func(endpoint *MockEndpoint, callCount int, req *http.Request) (*http.Response, error) {
+			if deadline, hasDeadline := req.Context().Deadline(); hasDeadline {
+				deadlines <- time.Until(deadline)
+			} else {
+				deadlines <- 0
+			}
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader("OK")),
+				Header:     make(http.Header),
+			}, nil
+		},
+	}
+
+	settings := NiceTransport{
+		limiter: &Limiter{
+			backoff: NewExponentialBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultExponentialBackoffCoefficients),
+		},
+		maxAttempts:    1,
+		attemptTimeout: 500 * time.Millisecond,
+	}
+
+	client := createClientWithEndpoint(settings.Clone(), endpoint)
+
+	resp, err := client.Get("http://example.com")
+	if err != nil {
+		t.Fatal("expected 200 response, got unexpected error", err)
+	}
+	defer resp.Body.Close()
+
+	if observed := <-deadlines; observed < 250*time.Millisecond || observed > time.Second {
+		t.Fatalf("expected the clone to keep the 500ms attempt timeout, deadline observed was %s", observed)
+	}
+}
