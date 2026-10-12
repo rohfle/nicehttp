@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -879,5 +880,55 @@ func TestRoundTripperDefaultHeadersKeepRequestClean(t *testing.T) {
 	}
 	if sent := req.Header.Get("X-Caller"); sent != "caller-value" {
 		t.Fatalf("expected the caller's own header to be kept on the caller's request, got %q", sent)
+	}
+}
+
+func TestRoundTripperCloseIdleConnections(t *testing.T) {
+	// http.Client.CloseIdleConnections must reach the downstream transport,
+	// otherwise its idle connections are never closed
+	closed := make(chan struct{}, 4)
+
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "OK") //nolint:errcheck
+	}))
+	server.Config.ConnState = func(c net.Conn, state http.ConnState) {
+		switch state {
+		case http.StateClosed, http.StateHijacked:
+			closed <- struct{}{}
+		}
+	}
+	server.Start()
+	defer server.Close()
+
+	transport, err := NewNiceTransportBuilder().
+		SetLimiterBackoff(NewExponentialBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultExponentialBackoffCoefficients)).
+		Build()
+	if err != nil {
+		t.Fatalf("while building transport: %s", err)
+	}
+	client := &http.Client{Transport: transport}
+
+	// Complete a request so that the connection becomes idle and reusable
+	resp, err := client.Get(server.URL)
+	if err != nil {
+		t.Fatalf("unexpected error while making request: %s", err)
+	}
+	io.ReadAll(resp.Body) //nolint:errcheck
+	resp.Body.Close()
+
+	// The connection is idle, so nothing should have closed it yet
+	select {
+	case <-closed:
+		t.Fatal("expected the idle connection to stay open before CloseIdleConnections is called")
+	default:
+	}
+
+	client.CloseIdleConnections()
+
+	select {
+	case <-closed:
+		// The connection was closed, so the call reached the downstream transport
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected CloseIdleConnections to close the idle connection of the downstream transport")
 	}
 }

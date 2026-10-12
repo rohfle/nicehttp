@@ -113,6 +113,14 @@ func (s *NiceTransport) Clone() *NiceTransport {
 	return &snew
 }
 
+// CloseIdleConnections closes idle connections in the downstream roundtripper.
+// It is called by http.Client.CloseIdleConnections.
+func (rt *NiceTransport) CloseIdleConnections() {
+	if closer, ok := rt.downstreamTransport.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
+}
+
 func shouldRetryRequest(resp *http.Response, err error) bool {
 	if err != nil {
 		// Retry if a network error has occurred, such as

@@ -105,6 +105,17 @@ func (t *NicePerHostTransport) ForHost(host string) (*NiceTransport, error) {
 	return transport, nil
 }
 
+// CloseIdleConnections closes idle connections in all the transports created
+// for the hosts requested so far. It is called by
+// http.Client.CloseIdleConnections.
+func (t *NicePerHostTransport) CloseIdleConnections() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, transport := range t.transports {
+		transport.CloseIdleConnections()
+	}
+}
+
 func (t *NicePerHostTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req == nil || req.URL == nil || req.URL.Hostname() == "" {
 		return nil, fmt.Errorf("invalid request URL: missing hostname")
