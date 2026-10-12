@@ -37,6 +37,12 @@ var DefaultUserAgent = fmt.Sprintf("nicehttp/%s", getVersion())
 var DefaultAttemptTimeout time.Duration = 0
 var DefaultMaxAttempts = 10
 
+// discardedBodyLimit is the maximum number of bytes read from the response body
+// of a request attempt that is going to be retried. Draining the body allows
+// the downstream roundtripper to reuse the connection; a body larger than this
+// limit is closed early and its connection is dropped instead.
+const discardedBodyLimit = 4096
+
 type readSeekCloser struct {
 	*bytes.Reader
 }
@@ -227,8 +233,15 @@ func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error
 			return resp, err
 		}
 
-		// The response of this attempt is discarded by the retry,
-		// so the attempt can be cancelled now
+		// The response of this attempt is discarded by the retry, so drain what
+		// is left of the body and close it. Without this, the body holds on to
+		// its connection and the next attempt cannot use it
+		if resp != nil && resp.Body != nil {
+			io.Copy(io.Discard, io.LimitReader(resp.Body, discardedBodyLimit))
+			resp.Body.Close()
+		}
+
+		// The attempt can be cancelled now that its response has been released
 		if cancelAttemptCtx != nil {
 			cancelAttemptCtx()
 		}

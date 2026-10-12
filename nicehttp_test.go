@@ -646,3 +646,66 @@ func TestRoundTripperAttemptTimeoutBodyRead(t *testing.T) {
 		t.Fatalf("expected body %q, got %q", "hello", string(data))
 	}
 }
+
+func TestRoundTripperRetryWithConnectionLimit(t *testing.T) {
+	// The body of a retriable response must be released before retrying,
+	// because it holds on to its connection. With the connection limit of one
+	// per host recommended in the readme, a body that is left open means the
+	// retry waits for a connection that is never released.
+	expectedCalls := 2
+
+	var mutex sync.Mutex
+	callCount := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mutex.Lock()
+		callCount += 1
+		currentCall := callCount
+		mutex.Unlock()
+
+		if currentCall == 1 {
+			w.WriteHeader(503)
+			io.WriteString(w, "Service Unavailable") //nolint:errcheck
+			return
+		}
+		io.WriteString(w, "OK") //nolint:errcheck
+	}))
+	defer server.Close()
+
+	downstream := http.DefaultTransport.(*http.Transport).Clone()
+	downstream.MaxConnsPerHost = 1
+
+	transport, err := NewNiceTransportBuilder().
+		SetDownstreamTransport(downstream).
+		SetLimiterBackoff(NewExponentialBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultExponentialBackoffCoefficients)).
+		SetMaxAttempts(3).
+		Build()
+	if err != nil {
+		t.Fatalf("while building transport: %s", err)
+	}
+
+	// The deadline only guards against the retry waiting for a connection forever
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL, nil)
+	if err != nil {
+		t.Fatalf("http.NewRequestWithContext failed: %s", err)
+	}
+
+	client := &http.Client{Transport: transport}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("expected 200 response, got unexpected error: %s", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200 response but got status %d", resp.StatusCode)
+	}
+
+	mutex.Lock()
+	defer mutex.Unlock()
+	if callCount != expectedCalls {
+		t.Fatalf("expected call count %d, got %d", expectedCalls, callCount)
+	}
+}
