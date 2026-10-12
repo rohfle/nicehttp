@@ -1,6 +1,7 @@
 package nicehttp
 
 import (
+	"fmt"
 	"math/rand/v2"
 	"time"
 )
@@ -34,6 +35,53 @@ var DefaultExponentialBackoffCoefficients = ExponentialBackoffCoefficients{
 }
 
 var DefaultExponentialBackoff = NewExponentialBackoff(1*time.Second, 120*time.Second, DefaultExponentialBackoffCoefficients)
+
+func NewExponentialBackoffFromMap(data map[string]any) (Backoff, error) {
+	minWaitStr, ok := data["minWait"].(string)
+	if !ok {
+		return nil, fmt.Errorf("minWait must be a string")
+	}
+
+	maxWaitStr, ok := data["maxWait"].(string)
+	if !ok {
+		return nil, fmt.Errorf("maxWait must be a string")
+	}
+
+	minWait, err := time.ParseDuration(minWaitStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid minWait duration: %w", err)
+	}
+
+	maxWait, err := time.ParseDuration(maxWaitStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid maxWait duration: %w", err)
+	}
+
+	var coeff ExponentialBackoffCoefficients
+	if coeffData, ok := data["coeff"].(map[string]any); !ok {
+		coeff = DefaultExponentialBackoffCoefficients
+	} else {
+		if success, ok := coeffData["Success"].(float64); ok {
+			coeff.Success = success
+		} else {
+			coeff.Success = DefaultExponentialBackoffCoefficients.Success
+		}
+
+		if fail, ok := coeffData["Fail"].(float64); ok {
+			coeff.Fail = fail
+		} else {
+			coeff.Fail = DefaultExponentialBackoffCoefficients.Fail
+		}
+
+		if jitter, ok := coeffData["Jitter"].(float64); ok {
+			coeff.Jitter = jitter
+		} else {
+			coeff.Jitter = DefaultExponentialBackoffCoefficients.Jitter
+		}
+	}
+
+	return NewExponentialBackoff(minWait, maxWait, coeff), nil
+}
 
 func NewExponentialBackoff(minWait time.Duration, maxWait time.Duration, coeff ExponentialBackoffCoefficients) *ExponentialBackoff {
 	return &ExponentialBackoff{
