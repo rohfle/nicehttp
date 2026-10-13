@@ -32,9 +32,13 @@ func getVersion() string {
 	return "unknown"
 }
 
-var NoTimeout time.Duration = 0
+// NoTimeout means the request will wait forever to complete
+// TimeoutNotSet means the timeout is unset, so DefaultAttemptTimeout applies
+const NoTimeout time.Duration = 0
+const TimeoutNotSet time.Duration = -1
+
 var DefaultUserAgent = fmt.Sprintf("nicehttp/%s", getVersion())
-var DefaultAttemptTimeout time.Duration = 0
+var DefaultAttemptTimeout time.Duration = NoTimeout
 var DefaultMaxAttempts = 10
 
 // discardedBodyLimit is the maximum number of bytes read from the response body

@@ -27,8 +27,15 @@ type PerHostConfig struct {
 	DefaultHeaders http.Header
 	Backoff        *Backoff
 	TLS            *tls.Config
+
+	// AttemptTimeout limits the time of a single attempt. 0 means no attempt
+	// timeout (NoTimeout), and a negative value (TimeoutNotSet) means unset,
+	// which uses DefaultAttemptTimeout. Config loading never produces a
+	// negative value: an unset key is inherited from the defaults, and "none"
+	// or 0 is off.
 	AttemptTimeout time.Duration
-	MaxAttempts    int
+
+	MaxAttempts int
 }
 
 type PerHostConfigManager struct {
@@ -64,8 +71,11 @@ func (c *PerHostConfig) CreateNiceTransport() (*NiceTransport, error) {
 	if c.MaxAttempts > 0 {
 		builder = builder.SetMaxAttempts(c.MaxAttempts)
 	}
-	if c.AttemptTimeout > 0 {
-		builder = builder.SetAttemptTimeout(c.AttemptTimeout)
+	// A negative value means unset, so it follows the default; 0 (NoTimeout)
+	// means no attempt timeout
+	attemptTimeout := c.AttemptTimeout
+	if attemptTimeout >= 0 {
+		builder = builder.SetAttemptTimeout(attemptTimeout)
 	}
 	if c.Backoff != nil {
 		builder = builder.SetLimiterBackoff(c.Backoff)
@@ -210,7 +220,8 @@ func normalizeHost(host string) string {
 //
 // Config keys:
 //   - max_attempts: whole number, at least 1
-//   - attempt_timeout: positive duration string, for example "30s"
+//   - attempt_timeout: positive duration string, for example "30s", or
+//     "none" (or "0s", or the number 0) for no attempt timeout
 //   - default_headers: map of header name to a string or list of strings.
 //     Headers are merged per name; an empty list removes the header.
 //   - backoff: map accepted by NewBackoffFromMap
@@ -283,7 +294,9 @@ func NewPerHostConfigManagerFromMap(data map[string]any) (*PerHostConfigManager,
 // path prefixes error messages, for example "hosts[api.example.com]". Keys are
 // processed in sorted order so the first reported error is reproducible.
 func perHostConfigFromEntry(entry map[string]any, defaults *PerHostConfig, path string) (*PerHostConfig, error) {
-	config := &PerHostConfig{}
+	config := &PerHostConfig{
+		AttemptTimeout: TimeoutNotSet,
+	}
 	if defaults != nil {
 		config = defaults.Clone()
 	}
@@ -298,7 +311,7 @@ func perHostConfigFromEntry(entry map[string]any, defaults *PerHostConfig, path 
 			}
 			config.MaxAttempts = maxAttempts
 		case "attempt_timeout":
-			attemptTimeout, err := durationFromValue(value, keyPath(path, key))
+			attemptTimeout, err := attemptTimeoutFromValue(value, keyPath(path, key))
 			if err != nil {
 				return nil, err
 			}
@@ -358,6 +371,38 @@ func keyPath(prefix, key string) string {
 		return key
 	}
 	return prefix + "." + key
+}
+
+// attemptTimeoutFromValue reads an attempt timeout: a positive duration, or
+// "none", "0s" or 0 for no attempt timeout.
+func attemptTimeoutFromValue(value any, path string) (time.Duration, error) {
+	switch v := value.(type) {
+	case string:
+		if strings.EqualFold(strings.TrimSpace(v), "none") {
+			return NoTimeout, nil
+		}
+		if duration, err := time.ParseDuration(v); err == nil && duration == NoTimeout {
+			return NoTimeout, nil
+		}
+	case int:
+		if v == 0 {
+			return NoTimeout, nil // yaml decodes numbers as int
+		}
+	case int64:
+		if v == 0 {
+			return NoTimeout, nil
+		}
+	case float64:
+		if v == 0 {
+			return NoTimeout, nil // json decodes numbers as float64
+		}
+	}
+
+	timeout, err := durationFromValue(value, path)
+	if err != nil {
+		return 0, fmt.Errorf("%w (use %q for no attempt timeout)", err, "none")
+	}
+	return timeout, nil
 }
 
 // durationFromValue parses a duration string, for example "30s"

@@ -997,6 +997,47 @@ func TestZeroValueBuilder(t *testing.T) {
 	}
 }
 
+// TestBuilderAttemptTimeout checks that an unset attempt timeout follows
+// DefaultAttemptTimeout, and that NoTimeout still means no timeout.
+func TestBuilderAttemptTimeout(t *testing.T) {
+	restore := DefaultAttemptTimeout
+	DefaultAttemptTimeout = 5 * time.Second
+	defer func() { DefaultAttemptTimeout = restore }()
+
+	transport, err := NewNiceTransportBuilder().Build()
+	if err != nil {
+		t.Fatalf("while building transport: %s", err)
+	}
+	if transport.attemptTimeout != 5*time.Second {
+		t.Errorf("expected the default attempt timeout, got %v", transport.attemptTimeout)
+	}
+
+	transport, err = NewNiceTransportBuilder().SetAttemptTimeout(NoTimeout).Build()
+	if err != nil {
+		t.Fatalf("while building transport: %s", err)
+	}
+	if transport.attemptTimeout != NoTimeout {
+		t.Errorf("expected no attempt timeout, got %v", transport.attemptTimeout)
+	}
+
+	transport, err = NewNiceTransportBuilder().SetAttemptTimeout(30 * time.Second).Build()
+	if err != nil {
+		t.Fatalf("while building transport: %s", err)
+	}
+	if transport.attemptTimeout != 30*time.Second {
+		t.Errorf("expected a 30s attempt timeout, got %v", transport.attemptTimeout)
+	}
+
+	// Set copies the timeout of an existing transport, which is already resolved
+	transport, err = NewNiceTransportBuilder().Set(transport).Build()
+	if err != nil {
+		t.Fatalf("while building transport: %s", err)
+	}
+	if transport.attemptTimeout != 30*time.Second {
+		t.Errorf("expected a 30s attempt timeout, got %v", transport.attemptTimeout)
+	}
+}
+
 func TestZeroValueTransport(t *testing.T) {
 	// An unconfigured transport must report an error instead of panicking
 	req, err := http.NewRequest(http.MethodGet, "http://example.com", nil)

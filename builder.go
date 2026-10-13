@@ -8,7 +8,7 @@ import (
 // NiceTransportBuilder is a builder used to create a NiceTransport
 type NiceTransportBuilder struct {
 	defaultHeaders      http.Header
-	attemptTimeout      time.Duration
+	attemptTimeout      time.Duration // TimeoutNotSet until SetAttemptTimeout is called
 	maxAttempts         int
 	downstreamTransport http.RoundTripper
 	limiter             *Limiter
@@ -18,6 +18,7 @@ type NiceTransportBuilder struct {
 func NewNiceTransportBuilder() *NiceTransportBuilder {
 	return &NiceTransportBuilder{
 		defaultHeaders: map[string][]string{"User-Agent": {DefaultUserAgent}},
+		attemptTimeout: TimeoutNotSet,
 	}
 }
 
@@ -72,7 +73,9 @@ func (b *NiceTransportBuilder) SetLimiterBackoff(backoff *Backoff) *NiceTranspor
 // after which the request will be retried. This is part of the total
 // request time, which is controlled by the http.Client timeout.
 
-// A value of 0 means no timeout.
+// A value of NoTimeout means no timeout, and TimeoutNotSet (or any negative
+// value) means the attempt timeout is not set, so DefaultAttemptTimeout is
+// used.
 func (b *NiceTransportBuilder) SetAttemptTimeout(timeout time.Duration) *NiceTransportBuilder {
 	b.attemptTimeout = timeout
 	return b
@@ -110,7 +113,7 @@ func (b *NiceTransportBuilder) Build() (*NiceTransport, error) {
 	if b.maxAttempts <= 0 {
 		b.maxAttempts = DefaultMaxAttempts
 	}
-	if b.attemptTimeout <= 0 {
+	if b.attemptTimeout < 0 {
 		b.attemptTimeout = DefaultAttemptTimeout
 	}
 	if b.downstreamTransport == nil {
