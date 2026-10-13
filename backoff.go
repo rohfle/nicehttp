@@ -1,8 +1,12 @@
 package nicehttp
 
 import (
+	"errors"
 	"fmt"
+	"maps"
+	"math"
 	"math/rand/v2"
+	"slices"
 	"time"
 )
 
@@ -29,51 +33,90 @@ var DefaultBackoffCoefficients = BackoffCoefficients{
 
 var DefaultBackoff = NewBackoff(1*time.Second, 120*time.Second, DefaultBackoffCoefficients)
 
-func NewBackoffFromMap(data map[string]any) (*Backoff, error) {
-	minWaitStr, ok := data["minWait"].(string)
-	if !ok {
-		return nil, fmt.Errorf("minWait must be a string")
+// NewBackoffFromMap builds a Backoff from a config map. Keys that are absent
+// are taken from base, or from DefaultBackoff when base is nil.
+//
+// Accepted keys: min_wait and max_wait (duration strings), and coefficients,
+// a map accepting success, fail and jitter (numbers).
+func NewBackoffFromMap(data map[string]any, base *Backoff) (*Backoff, error) {
+	if base == nil {
+		base = DefaultBackoff
 	}
+	minWait, maxWait, coeff := base.MinWait, base.MaxWait, base.Coeff
 
-	maxWaitStr, ok := data["maxWait"].(string)
-	if !ok {
-		return nil, fmt.Errorf("maxWait must be a string")
-	}
-
-	minWait, err := time.ParseDuration(minWaitStr)
-	if err != nil {
-		return nil, fmt.Errorf("invalid minWait duration: %w", err)
-	}
-
-	maxWait, err := time.ParseDuration(maxWaitStr)
-	if err != nil {
-		return nil, fmt.Errorf("invalid maxWait duration: %w", err)
-	}
-
-	var coeff BackoffCoefficients
-	if coeffData, ok := data["coeff"].(map[string]any); !ok {
-		coeff = DefaultBackoffCoefficients
-	} else {
-		if success, ok := coeffData["Success"].(float64); ok {
-			coeff.Success = success
-		} else {
-			coeff.Success = DefaultBackoffCoefficients.Success
+	for _, key := range slices.Sorted(maps.Keys(data)) {
+		switch key {
+		case "min_wait":
+			d, err := durationFromValue(data[key], key)
+			if err != nil {
+				return nil, err
+			}
+			minWait = d
+		case "max_wait":
+			d, err := durationFromValue(data[key], key)
+			if err != nil {
+				return nil, err
+			}
+			maxWait = d
+		case "coefficients":
+			coeffData, ok := data[key].(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("%s: must be a map", key)
+			}
+			for _, ck := range slices.Sorted(maps.Keys(coeffData)) {
+				p := keyPath(key, ck)
+				f, err := floatFromValue(coeffData[ck], p)
+				if err != nil {
+					return nil, err
+				}
+				switch ck {
+				case "success":
+					coeff.Success = f
+				case "fail":
+					coeff.Fail = f
+				case "jitter":
+					coeff.Jitter = f
+				default:
+					return nil, fmt.Errorf("%s: unknown key", p)
+				}
+			}
+		default:
+			return nil, fmt.Errorf("%s: unknown key", key)
 		}
-
-		if fail, ok := coeffData["Fail"].(float64); ok {
-			coeff.Fail = fail
-		} else {
-			coeff.Fail = DefaultBackoffCoefficients.Fail
-		}
-
-		if jitter, ok := coeffData["Jitter"].(float64); ok {
-			coeff.Jitter = jitter
-		} else {
-			coeff.Jitter = DefaultBackoffCoefficients.Jitter
-		}
 	}
 
+	if minWait <= 0 {
+		return nil, errors.New("min_wait: must be positive")
+	}
+	if maxWait < minWait {
+		return nil, errors.New("max_wait: must not be less than min_wait")
+	}
+	if coeff.Success <= 0 || coeff.Fail <= 0 {
+		return nil, errors.New("coefficients: success and fail must be positive")
+	}
+	if coeff.Jitter < 0 || coeff.Jitter > 1 {
+		return nil, errors.New("coefficients.jitter: must be between 0 and 1")
+	}
 	return NewBackoff(minWait, maxWait, coeff), nil
+}
+
+// floatFromValue reads a finite number. Yaml may decode "2" as int.
+func floatFromValue(value any, path string) (float64, error) {
+	var f float64
+	switch v := value.(type) {
+	case float64:
+		f = v
+	case int:
+		f = float64(v)
+	case int64:
+		f = float64(v)
+	default:
+		return 0, fmt.Errorf("%s: must be a number", path)
+	}
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0, fmt.Errorf("%s: must be finite", path)
+	}
+	return f, nil
 }
 
 func NewBackoff(minWait time.Duration, maxWait time.Duration, coeff BackoffCoefficients) *Backoff {
