@@ -55,8 +55,8 @@ func (b *NiceTransportBuilder) SetDefaultHeaders(headers http.Header) *NiceTrans
 
 // SetLimiterBackoff sets the backoff for the limiter.
 
-// If this is not set, or set to nil, the DefaultExponentialBackoff will be used
-func (b *NiceTransportBuilder) SetLimiterBackoff(backoff Backoff) *NiceTransportBuilder {
+// If this is not set, or set to nil, the DefaultBackoff will be used
+func (b *NiceTransportBuilder) SetLimiterBackoff(backoff *Backoff) *NiceTransportBuilder {
 	if backoff == nil {
 		// A nil backoff means the default backoff is used
 		b.limiter = nil
@@ -119,7 +119,7 @@ func (b *NiceTransportBuilder) Build() (*NiceTransport, error) {
 	}
 	if b.limiter == nil {
 		b.limiter = &Limiter{
-			backoff: DefaultExponentialBackoff.Clone(),
+			backoff: DefaultBackoff.Clone(),
 		}
 	}
 

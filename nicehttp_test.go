@@ -101,7 +101,7 @@ func createClientWithEndpoint(settings *NiceTransport, endpoint *MockEndpoint) *
 func TestRoundTripperFirstRun(t *testing.T) {
 	// context with deadline set
 	// limiter wait with context expires
-	backoff := NewExponentialBackoff(100*time.Millisecond, 1*time.Second, DefaultExponentialBackoffCoefficients)
+	backoff := NewBackoff(100*time.Millisecond, 1*time.Second, DefaultBackoffCoefficients)
 	settings := NiceTransport{
 		defaultHeaders: http.Header{
 			"Empty-Header": []string{}, // test headers with empty value list
@@ -187,7 +187,7 @@ func TestRoundTripperSecondRun(t *testing.T) {
 	// backoff max reached limiting
 	settings := NiceTransport{
 		limiter: &Limiter{
-			backoff: NewExponentialBackoff(10*time.Millisecond, 30*time.Millisecond, DefaultExponentialBackoffCoefficients),
+			backoff: NewBackoff(10*time.Millisecond, 30*time.Millisecond, DefaultBackoffCoefficients),
 		},
 		maxAttempts: 5,
 	}
@@ -252,7 +252,7 @@ func TestRoundTripperSecondRun(t *testing.T) {
 
 func TestRoundTripperThirdRun(t *testing.T) {
 	// deadline around 0.5 * RequestInterval
-	backoff := NewExponentialBackoff(500*time.Millisecond, 500*time.Millisecond, DefaultExponentialBackoffCoefficients)
+	backoff := NewBackoff(500*time.Millisecond, 500*time.Millisecond, DefaultBackoffCoefficients)
 	settings, err := NewNiceTransportBuilder().
 		SetLimiterBackoff(backoff).
 		SetMaxAttempts(5).Build()
@@ -320,7 +320,7 @@ func TestRoundTripperFourthRun(t *testing.T) {
 
 	settings := NiceTransport{
 		limiter: &Limiter{
-			backoff: NewExponentialBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultExponentialBackoffCoefficients),
+			backoff: NewBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultBackoffCoefficients),
 		},
 		maxAttempts:    5,
 		defaultHeaders: map[string][]string{"Some-Header": {}},
@@ -384,7 +384,7 @@ func TestRoundTripperFourthRun(t *testing.T) {
 func TestRoundTripperMultithread(t *testing.T) {
 	settings := NiceTransport{
 		limiter: &Limiter{
-			backoff: NewExponentialBackoff(10*time.Millisecond, 100*time.Millisecond, DefaultExponentialBackoffCoefficients),
+			backoff: NewBackoff(10*time.Millisecond, 100*time.Millisecond, DefaultBackoffCoefficients),
 		},
 		maxAttempts: 5,
 	}
@@ -510,7 +510,7 @@ func TestRoundTripperRetryAfterSeconds(t *testing.T) {
 
 	settings := &NiceTransport{
 		limiter: &Limiter{
-			backoff: NewExponentialBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultExponentialBackoffCoefficients),
+			backoff: NewBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultBackoffCoefficients),
 		},
 	}
 
@@ -566,7 +566,7 @@ func TestRoundTripperAttemptTimeoutOverride(t *testing.T) {
 		},
 	}
 
-	backoff := NewExponentialBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultExponentialBackoffCoefficients)
+	backoff := NewBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultBackoffCoefficients)
 
 	// No attempt timeout in the transport, so the context value must be used
 	settings := NiceTransport{
@@ -678,7 +678,7 @@ func TestRoundTripperRetryWithConnectionLimit(t *testing.T) {
 
 	transport, err := NewNiceTransportBuilder().
 		SetDownstreamTransport(downstream).
-		SetLimiterBackoff(NewExponentialBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultExponentialBackoffCoefficients)).
+		SetLimiterBackoff(NewBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultBackoffCoefficients)).
 		SetMaxAttempts(3).
 		Build()
 	if err != nil {
@@ -737,7 +737,7 @@ func TestRoundTripperCloneKeepsAttemptTimeout(t *testing.T) {
 
 	settings := NiceTransport{
 		limiter: &Limiter{
-			backoff: NewExponentialBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultExponentialBackoffCoefficients),
+			backoff: NewBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultBackoffCoefficients),
 		},
 		maxAttempts:    1,
 		attemptTimeout: 500 * time.Millisecond,
@@ -781,7 +781,7 @@ func TestRoundTripperLimiterReleasedAfterPanic(t *testing.T) {
 
 	settings := NiceTransport{
 		limiter: &Limiter{
-			backoff: NewExponentialBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultExponentialBackoffCoefficients),
+			backoff: NewBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultBackoffCoefficients),
 		},
 		maxAttempts: 1,
 	}
@@ -848,7 +848,7 @@ func TestRoundTripperDefaultHeadersKeepRequestClean(t *testing.T) {
 	settings := NiceTransport{
 		defaultHeaders: http.Header{"X-Default": {"default-value"}},
 		limiter: &Limiter{
-			backoff: NewExponentialBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultExponentialBackoffCoefficients),
+			backoff: NewBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultBackoffCoefficients),
 		},
 		maxAttempts: 1,
 	}
@@ -901,7 +901,7 @@ func TestRoundTripperCloseIdleConnections(t *testing.T) {
 	defer server.Close()
 
 	transport, err := NewNiceTransportBuilder().
-		SetLimiterBackoff(NewExponentialBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultExponentialBackoffCoefficients)).
+		SetLimiterBackoff(NewBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultBackoffCoefficients)).
 		Build()
 	if err != nil {
 		t.Fatalf("while building transport: %s", err)

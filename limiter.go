@@ -10,13 +10,13 @@ import (
 type Limiter struct {
 	mu fifomu.Mutex
 
-	backoff Backoff
+	backoff *Backoff
 }
 
-func NewLimiter(backoff Backoff) *Limiter {
+func NewLimiter(backoff *Backoff) *Limiter {
 	if backoff == nil {
 		// A nil backoff means the default backoff is used
-		backoff = DefaultExponentialBackoff.Clone()
+		backoff = DefaultBackoff.Clone()
 	}
 	return &Limiter{
 		backoff: backoff,

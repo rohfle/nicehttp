@@ -29,8 +29,8 @@ func main() {
 	//     InsecureSkipVerify: true, // Skip certificate verification
 	// }
 
-	backoff := nicehttp.NewExponentialBackoff(1*time.Second, 120*time.Second, nicehttp.DefaultExponentialBackoffCoefficients)
-	// backoff := nicehttp.NewExponentialBackoff(1*time.Second, 120*time.Second, nicehttp.ExponentialBackoffCoefficients{
+	backoff := nicehttp.NewBackoff(1*time.Second, 120*time.Second, nicehttp.DefaultBackoffCoefficients)
+	// backoff := nicehttp.NewBackoff(1*time.Second, 120*time.Second, nicehttp.BackoffCoefficients{
 	// 	   Success: 0.5,
 	// 	   Fail:    1.5,
 	// 	   Jitter:  0.3,

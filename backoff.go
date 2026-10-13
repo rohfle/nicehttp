@@ -6,37 +6,30 @@ import (
 	"time"
 )
 
-type Backoff interface {
-	Update(fail bool, waitGiven time.Duration) time.Duration
-	UntilNext() time.Duration
-	Next() time.Time
-	Clone() Backoff
-}
-
-type ExponentialBackoff struct {
+type Backoff struct {
 	last time.Time
 	wait time.Duration
 
-	minWait time.Duration
-	maxWait time.Duration
-	coeff   ExponentialBackoffCoefficients
+	MinWait time.Duration       `json:"min_wait"`
+	MaxWait time.Duration       `json:"max_wait"`
+	Coeff   BackoffCoefficients `json:"coefficients"`
 }
 
-type ExponentialBackoffCoefficients struct {
-	Success float64
-	Fail    float64
-	Jitter  float64
+type BackoffCoefficients struct {
+	Success float64 `json:"success"`
+	Fail    float64 `json:"fail"`
+	Jitter  float64 `json:"jitter"`
 }
 
-var DefaultExponentialBackoffCoefficients = ExponentialBackoffCoefficients{
+var DefaultBackoffCoefficients = BackoffCoefficients{
 	Success: 0.5,
 	Fail:    1.5,
 	Jitter:  0.3,
 }
 
-var DefaultExponentialBackoff = NewExponentialBackoff(1*time.Second, 120*time.Second, DefaultExponentialBackoffCoefficients)
+var DefaultBackoff = NewBackoff(1*time.Second, 120*time.Second, DefaultBackoffCoefficients)
 
-func NewExponentialBackoffFromMap(data map[string]any) (Backoff, error) {
+func NewBackoffFromMap(data map[string]any) (*Backoff, error) {
 	minWaitStr, ok := data["minWait"].(string)
 	if !ok {
 		return nil, fmt.Errorf("minWait must be a string")
@@ -57,52 +50,52 @@ func NewExponentialBackoffFromMap(data map[string]any) (Backoff, error) {
 		return nil, fmt.Errorf("invalid maxWait duration: %w", err)
 	}
 
-	var coeff ExponentialBackoffCoefficients
+	var coeff BackoffCoefficients
 	if coeffData, ok := data["coeff"].(map[string]any); !ok {
-		coeff = DefaultExponentialBackoffCoefficients
+		coeff = DefaultBackoffCoefficients
 	} else {
 		if success, ok := coeffData["Success"].(float64); ok {
 			coeff.Success = success
 		} else {
-			coeff.Success = DefaultExponentialBackoffCoefficients.Success
+			coeff.Success = DefaultBackoffCoefficients.Success
 		}
 
 		if fail, ok := coeffData["Fail"].(float64); ok {
 			coeff.Fail = fail
 		} else {
-			coeff.Fail = DefaultExponentialBackoffCoefficients.Fail
+			coeff.Fail = DefaultBackoffCoefficients.Fail
 		}
 
 		if jitter, ok := coeffData["Jitter"].(float64); ok {
 			coeff.Jitter = jitter
 		} else {
-			coeff.Jitter = DefaultExponentialBackoffCoefficients.Jitter
+			coeff.Jitter = DefaultBackoffCoefficients.Jitter
 		}
 	}
 
-	return NewExponentialBackoff(minWait, maxWait, coeff), nil
+	return NewBackoff(minWait, maxWait, coeff), nil
 }
 
-func NewExponentialBackoff(minWait time.Duration, maxWait time.Duration, coeff ExponentialBackoffCoefficients) *ExponentialBackoff {
-	return &ExponentialBackoff{
+func NewBackoff(minWait time.Duration, maxWait time.Duration, coeff BackoffCoefficients) *Backoff {
+	return &Backoff{
 		last:    time.Now().Add(-minWait),
 		wait:    minWait,
-		minWait: minWait,
-		maxWait: maxWait,
-		coeff:   coeff,
+		MinWait: minWait,
+		MaxWait: maxWait,
+		Coeff:   coeff,
 	}
 }
 
-func (adj *ExponentialBackoff) Update(fail bool, newWait time.Duration) time.Duration {
-	maxWait := adj.maxWait
+func (adj *Backoff) Update(fail bool, newWait time.Duration) time.Duration {
+	maxWait := adj.MaxWait
 
 	if newWait == 0 {
 		// Normal backoff
 		// Update wait value based on success or fail and current wait time.
-		jitter := (rand.Float64()-0.5)*adj.coeff.Jitter + 1
-		multiplier := adj.coeff.Success
+		jitter := (rand.Float64()-0.5)*adj.Coeff.Jitter + 1
+		multiplier := adj.Coeff.Success
 		if fail {
-			multiplier = adj.coeff.Fail
+			multiplier = adj.Coeff.Fail
 		}
 		newWait = time.Duration(multiplier * jitter * float64(adj.wait))
 	} else {
@@ -119,8 +112,8 @@ func (adj *ExponentialBackoff) Update(fail bool, newWait time.Duration) time.Dur
 	}
 
 	// Clamp minWait <= newWait <= maxWait
-	if newWait < adj.minWait {
-		newWait = adj.minWait
+	if newWait < adj.MinWait {
+		newWait = adj.MinWait
 	} else if newWait > maxWait {
 		newWait = maxWait
 	}
@@ -129,17 +122,17 @@ func (adj *ExponentialBackoff) Update(fail bool, newWait time.Duration) time.Dur
 	return adj.wait
 }
 
-func (adj *ExponentialBackoff) UntilNext() time.Duration {
+func (adj *Backoff) UntilNext() time.Duration {
 	return time.Until(adj.last) + adj.wait
 }
 
-func (adj *ExponentialBackoff) Next() time.Time {
+func (adj *Backoff) Next() time.Time {
 	return adj.last.Add(adj.wait)
 }
 
-func (adj *ExponentialBackoff) Clone() Backoff {
+func (adj *Backoff) Clone() *Backoff {
 	copy := *adj
-	copy.last = time.Now().Add(-copy.minWait)
-	copy.wait = copy.minWait
+	copy.last = time.Now().Add(-copy.MinWait)
+	copy.wait = copy.MinWait
 	return &copy
 }
