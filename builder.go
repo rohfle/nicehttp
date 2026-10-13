@@ -103,7 +103,7 @@ func (b *NiceTransportBuilder) SetDownstreamTransport(rt http.RoundTripper) *Nic
 }
 
 // Build creates a NiceTransport with settings given previously combined with defaults.
-func (b *NiceTransportBuilder) Build() (*NiceTransport, error) {
+func (b *NiceTransportBuilder) Build() *NiceTransport {
 	// Set defaults
 	if b.defaultHeaders == nil {
 		// The builder was not created by NewNiceTransportBuilder, so apply the
@@ -132,5 +132,5 @@ func (b *NiceTransportBuilder) Build() (*NiceTransport, error) {
 		attemptTimeout:      b.attemptTimeout,
 		limiter:             b.limiter,
 		downstreamTransport: b.downstreamTransport,
-	}, nil
+	}
 }

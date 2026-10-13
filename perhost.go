@@ -90,7 +90,7 @@ func (c *PerHostConfig) CreateNiceTransport() (*NiceTransport, error) {
 		builder = builder.SetDownstreamTransport(downstream)
 	}
 
-	return builder.Build()
+	return builder.Build(), nil
 }
 
 func (m *PerHostConfigManager) ForHost(host string) (*PerHostConfig, error) {

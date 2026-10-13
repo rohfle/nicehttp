@@ -129,6 +129,26 @@ func NewBackoff(minWait time.Duration, maxWait time.Duration, coeff BackoffCoeff
 	}
 }
 
+// Update records the outcome of an attempt, schedules the next one, and
+// returns the wait from now until it may happen. It also stamps the current
+// time, so Next and UntilNext are measured from this call.
+//
+// With newWait == 0 the wait follows the exponential schedule: the previous
+// wait is multiplied by Coeff.Fail if fail is true, or Coeff.Success
+// otherwise, then scaled by a random jitter factor in the range
+// 1 ± Coeff.Jitter/2. The result is clamped to MinWait..MaxWait.
+//
+// With newWait != 0 the schedule is overridden, which is how a Retry-After
+// header is honoured. fail is ignored and no jitter is applied. The wait is
+// clamped to MinWait..24h, not MinWait..MaxWait, so a server's request can
+// exceed MaxWait but a request for days cannot stall the host indefinitely.
+// Callers should still set a Timeout on the http.Client (10 minutes, for
+// example) as a backstop. Because the override becomes the current wait, the
+// next scheduled update starts from it, and is then clamped to MaxWait, so
+// the wait drops back into the normal range after one scheduled update.
+//
+// Update modifies the Backoff and is not safe for concurrent use; callers
+// must serialize access.
 func (adj *Backoff) Update(fail bool, newWait time.Duration) time.Duration {
 	maxWait := adj.MaxWait
 
@@ -142,15 +162,11 @@ func (adj *Backoff) Update(fail bool, newWait time.Duration) time.Duration {
 		}
 		newWait = time.Duration(multiplier * jitter * float64(adj.wait))
 	} else {
-		// Override backoff
-		// A wait has been given, probably by the Retry-After header
-		// and this could deadlock if set to a large delay (eg days).
-
-		// It is recommended to set Timeout in http.Client to a
-		// reasonable value such as 10 minutes to handle this.
-
-		// Wait at least minWait, even if Retry-After encourages retry sooner.
-		// Additionally, a maximum wait of 24 hours is set as a sane bound.
+		// Override, probably from a Retry-After header. The upper bound is
+		// fixed at 24h instead of MaxWait, because the server knows best
+		// when it will be ready, but an absurd value must not block forever.
+		// The lower bound below still applies, so a Retry-After shorter than
+		// MinWait is raised to MinWait.
 		maxWait = 24 * time.Hour
 	}
 

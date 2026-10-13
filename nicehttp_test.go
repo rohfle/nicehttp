@@ -88,10 +88,7 @@ func createClientWithEndpoint(settings *NiceTransport, endpoint *MockEndpoint) *
 		Endpoint: endpoint,
 	}
 
-	transport, err := NewNiceTransportBuilder().Set(settings).Build()
-	if err != nil {
-		panic(err)
-	}
+	transport := NewNiceTransportBuilder().Set(settings).Build()
 
 	return &http.Client{
 		Transport: transport,
@@ -253,12 +250,9 @@ func TestRoundTripperSecondRun(t *testing.T) {
 func TestRoundTripperThirdRun(t *testing.T) {
 	// deadline around 0.5 * RequestInterval
 	backoff := NewBackoff(500*time.Millisecond, 500*time.Millisecond, DefaultBackoffCoefficients)
-	settings, err := NewNiceTransportBuilder().
+	settings := NewNiceTransportBuilder().
 		SetLimiterBackoff(backoff).
 		SetMaxAttempts(5).Build()
-	if err != nil {
-		t.Fatalf("while building settings: %s", err)
-	}
 
 	expectedCalls := 1
 	deadlineDuration := 250 * time.Millisecond
@@ -625,12 +619,9 @@ func TestRoundTripperAttemptTimeoutBodyRead(t *testing.T) {
 	// A 5 second attempt timeout is long enough that it never fires here, so a
 	// failure is caused by the attempt being cancelled as soon as the response
 	// headers have been received.
-	transport, err := NewNiceTransportBuilder().
+	transport := NewNiceTransportBuilder().
 		SetAttemptTimeout(5 * time.Second).
 		Build()
-	if err != nil {
-		t.Fatalf("while building transport: %s", err)
-	}
 	client := &http.Client{Transport: transport}
 
 	resp, err := client.Get(server.URL)
@@ -676,14 +667,11 @@ func TestRoundTripperRetryWithConnectionLimit(t *testing.T) {
 	downstream := http.DefaultTransport.(*http.Transport).Clone()
 	downstream.MaxConnsPerHost = 1
 
-	transport, err := NewNiceTransportBuilder().
+	transport := NewNiceTransportBuilder().
 		SetDownstreamTransport(downstream).
 		SetLimiterBackoff(NewBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultBackoffCoefficients)).
 		SetMaxAttempts(3).
 		Build()
-	if err != nil {
-		t.Fatalf("while building transport: %s", err)
-	}
 
 	// The deadline only guards against the retry waiting for a connection forever
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -900,12 +888,9 @@ func TestRoundTripperCloseIdleConnections(t *testing.T) {
 	server.Start()
 	defer server.Close()
 
-	transport, err := NewNiceTransportBuilder().
+	transport := NewNiceTransportBuilder().
 		SetLimiterBackoff(NewBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultBackoffCoefficients)).
 		Build()
-	if err != nil {
-		t.Fatalf("while building transport: %s", err)
-	}
 	client := &http.Client{Transport: transport}
 
 	// Complete a request so that the connection becomes idle and reusable
@@ -953,16 +938,13 @@ func TestZeroValueBuilder(t *testing.T) {
 		},
 	}
 
-	transport, err := builder.
+	transport := builder.
 		SetUserAgent("zero-value-agent").
 		SetDefaultHeaders(http.Header{"X-Zero": {"zero"}}).
 		SetLimiterBackoff(nil).
 		SetMaxAttempts(1).
 		SetDownstreamTransport(&MockTransport{Endpoint: endpoint}).
 		Build()
-	if err != nil {
-		t.Fatalf("while building transport: %s", err)
-	}
 
 	resp, err := (&http.Client{Transport: transport}).Get("http://example.com")
 	if err != nil {
@@ -978,13 +960,10 @@ func TestZeroValueBuilder(t *testing.T) {
 	}
 
 	// A builder with no headers configured gets the default User-Agent
-	transport, err = (&NiceTransportBuilder{}).
+	transport = (&NiceTransportBuilder{}).
 		SetMaxAttempts(1).
 		SetDownstreamTransport(&MockTransport{Endpoint: endpoint}).
 		Build()
-	if err != nil {
-		t.Fatalf("while building transport: %s", err)
-	}
 
 	resp, err = (&http.Client{Transport: transport}).Get("http://example.com")
 	if err != nil {
@@ -1004,35 +983,23 @@ func TestBuilderAttemptTimeout(t *testing.T) {
 	DefaultAttemptTimeout = 5 * time.Second
 	defer func() { DefaultAttemptTimeout = restore }()
 
-	transport, err := NewNiceTransportBuilder().Build()
-	if err != nil {
-		t.Fatalf("while building transport: %s", err)
-	}
+	transport := NewNiceTransportBuilder().Build()
 	if transport.attemptTimeout != 5*time.Second {
 		t.Errorf("expected the default attempt timeout, got %v", transport.attemptTimeout)
 	}
 
-	transport, err = NewNiceTransportBuilder().SetAttemptTimeout(NoTimeout).Build()
-	if err != nil {
-		t.Fatalf("while building transport: %s", err)
-	}
+	transport = NewNiceTransportBuilder().SetAttemptTimeout(NoTimeout).Build()
 	if transport.attemptTimeout != NoTimeout {
 		t.Errorf("expected no attempt timeout, got %v", transport.attemptTimeout)
 	}
 
-	transport, err = NewNiceTransportBuilder().SetAttemptTimeout(30 * time.Second).Build()
-	if err != nil {
-		t.Fatalf("while building transport: %s", err)
-	}
+	transport = NewNiceTransportBuilder().SetAttemptTimeout(30 * time.Second).Build()
 	if transport.attemptTimeout != 30*time.Second {
 		t.Errorf("expected a 30s attempt timeout, got %v", transport.attemptTimeout)
 	}
 
 	// Set copies the timeout of an existing transport, which is already resolved
-	transport, err = NewNiceTransportBuilder().Set(transport).Build()
-	if err != nil {
-		t.Fatalf("while building transport: %s", err)
-	}
+	transport = NewNiceTransportBuilder().Set(transport).Build()
 	if transport.attemptTimeout != 30*time.Second {
 		t.Errorf("expected a 30s attempt timeout, got %v", transport.attemptTimeout)
 	}

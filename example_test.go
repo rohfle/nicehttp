@@ -19,7 +19,7 @@ func ExampleNewNiceTransportBuilder() {
 	defer server.Close()
 
 	headers := make(http.Header)
-	headers.Set("Authentication", "Bearer xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	headers.Set("Authorization", "Bearer xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
 
 	downstream := http.DefaultTransport.(*http.Transport).Clone()
 	downstream.MaxConnsPerHost = 1
@@ -34,7 +34,7 @@ func ExampleNewNiceTransportBuilder() {
 	// 	   Jitter:  0.3,
 	// })
 
-	transport, err := nicehttp.NewNiceTransportBuilder().
+	transport := nicehttp.NewNiceTransportBuilder().
 		SetDefaultHeaders(headers).
 		SetUserAgent("your-user-agent-here/0.1").
 		SetMaxAttempts(10).
@@ -42,10 +42,6 @@ func ExampleNewNiceTransportBuilder() {
 		SetLimiterBackoff(backoff).
 		SetDownstreamTransport(downstream).
 		Build()
-	if err != nil {
-		fmt.Println("error:", err)
-		return
-	}
 
 	client := &http.Client{
 		Transport: transport,

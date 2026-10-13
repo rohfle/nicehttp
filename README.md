@@ -1,6 +1,6 @@
 # nicehttp
 
-A nice HTTP client written in golang with rate limit, backup and max retries. Respects 429 Retry-After header.
+A nice HTTP client written in golang with rate limiting, backoff and max retries. Respects the 429 Retry-After header.
 
 [![Go Report Card](https://goreportcard.com/badge/github.com/rohfle/nicehttp)](https://goreportcard.com/report/github.com/rohfle/nicehttp)
 [![Test](https://github.com/rohfle/nicehttp/actions/workflows/test.yml/badge.svg)](https://github.com/rohfle/nicehttp/actions/workflows/test.yml)
@@ -12,52 +12,50 @@ A nice HTTP client written in golang with rate limit, backup and max retries. Re
 package main
 
 import (
-    "fmt"
-    "io"
-    "net/http"
+	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"time"
 
-    "github.com/rohfle/nicehttp"
+	"github.com/rohfle/nicehttp"
 )
 
 func main() {
-	headers := make(http.Header)
-	headers.Set("Authentication", "Bearer xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
 
 	downstream := http.DefaultTransport.(*http.Transport).Clone()
 	downstream.MaxConnsPerHost = 1
-	// downstream.TLSClientConfig = &tls.Config{
-	//     InsecureSkipVerify: true, // Skip certificate verification
-	// }
 
 	backoff := nicehttp.NewBackoff(1*time.Second, 120*time.Second, nicehttp.DefaultBackoffCoefficients)
-	// backoff := nicehttp.NewBackoff(1*time.Second, 120*time.Second, nicehttp.BackoffCoefficients{
-	// 	   Success: 0.5,
-	// 	   Fail:    1.5,
-	// 	   Jitter:  0.3,
+	// Or set the coefficients directly:
+	// backoff = nicehttp.NewBackoff(1*time.Second, 120*time.Second, nicehttp.BackoffCoefficients{
+	// 	Success: 0.5,
+	// 	Fail:    1.5,
+	// 	Jitter:  0.3,
 	// })
 
-	transport, err := nicehttp.NewNiceTransportBuilder().
+	transport := nicehttp.NewNiceTransportBuilder().
 		SetDefaultHeaders(headers).
 		SetUserAgent("your-user-agent-here/0.1").
 		SetMaxAttempts(10).
-		SetAttemptTimeout(120 * time.Second).
+		SetAttemptTimeout(120*time.Second).
 		SetLimiterBackoff(backoff).
 		SetDownstreamTransport(downstream).
 		Build()
-	if err != nil {
-		fmt.Println("error:", err)
-		return
-	}
 
 	client := &http.Client{
 		Transport: transport,
 		Timeout:   10 * time.Minute,
-		// CheckRedirect:
 	}
 
+	// The attempt timeout and the number of attempts can be overridden per
+	// request through the context
 	ctx := nicehttp.SetAttemptTimeoutInContext(context.Background(), 5*time.Second)
 	ctx = nicehttp.SetMaxAttemptsInContext(ctx, 5)
-	req, err := http.NewRequestWithContext(ctx, "GET", server.URL, nil)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.com", nil)
 	if err != nil {
 		fmt.Println("error:", err)
 		return
@@ -69,6 +67,7 @@ func main() {
 		return
 	}
 	defer resp.Body.Close()
+
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		fmt.Println("error:", err)
@@ -76,8 +75,56 @@ func main() {
 	}
 	fmt.Println("got resp:", string(data))
 }
-
 ```
+
+A runnable version of this example is in [`example_test.go`](./example_test.go).
+
+## Per host configuration
+
+`NewPerHostConfigManagerFromMap` takes a `map[string]any` based config
+and returns a factory that builds one `NiceTransport` per host on first use:
+
+```json
+{
+  "defaults": {
+    "attempt_timeout": "30s",
+    "max_attempts": 2,
+    "default_headers": { "Authorization": "Bearer xxxx" },
+    "backoff": {
+      "min_wait": "2s",
+      "max_wait": "30s",
+      "coefficients": { "success": 0.5, "fail": 1.5, "jitter": 0.3 }
+    }
+  },
+  "hosts": {
+    "api.example.com": { "max_attempts": 5 },
+    "api.internal.example.com": { "tls": { "insecure_skip_verify": true } },
+    "slow.example.com": { "attempt_timeout": "none" }
+  }
+}
+```
+
+```go
+// data is the document above decoded, for example with encoding/json
+manager, err := nicehttp.NewPerHostConfigManagerFromMap(data)
+if err != nil {
+	return err
+}
+transport, err := manager.CreateNicePerHostTransport()
+if err != nil {
+	return err
+}
+client := &http.Client{Transport: transport}
+```
+
+- **Inheritance**: Each host entry inherits from defaults. Unset keys are inherited, and a missing or null host entry falls back entirely to defaults.
+- **Attempt Timeout** (`attempt_timeout`): Accepts a duration string, "`none`", "`0s`", or `0` for no timeout. (In Go, `TimeoutNotSet` inherits from `DefaultAttemptTimeout`, whereas `0` explicitly disables it).
+- **Max Attempts** (`max_attempts`): Accepts an integer, at least 1.
+- **Default Headers** (`default_headers`): Replaces the inherited value per header name; it does not append. An empty list removes a header, while `null` is an error.
+- **Backoff** (`backoff`): Accepts `min_wait`, `max_wait`, and `coefficients`, and is merged onto the inherited backoff config.
+- **TLS** (`tls`): Supports `insecure_skip_verify` only. Unlike other fields, this replaces the inherited TLS configuration entirely rather than merging.
+- **Host Matching**: Host names are lowercased with any trailing dots ignored, and must not contain a port (requests match against `URL.Hostname()`). Unknown keys or invalid value types will result in an error.
+
 
 ## License
 

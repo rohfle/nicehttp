@@ -37,9 +37,27 @@ func getVersion() string {
 const NoTimeout time.Duration = 0
 const TimeoutNotSet time.Duration = -1
 
-var DefaultUserAgent = fmt.Sprintf("nicehttp/%s", getVersion())
-var DefaultAttemptTimeout time.Duration = NoTimeout
-var DefaultMaxAttempts = 10
+// Package defaults. They are read when a builder or per host config is
+// created or built, so changing one affects only transports created
+// afterwards, never existing ones. They are plain variables and are not
+// synchronized: set them during program initialization, before any transport
+// is created or used from another goroutine.
+var (
+	// DefaultUserAgent is the User-Agent header value added by the builder when
+	// the default headers do not include one. It is "nicehttp/<version>".
+	DefaultUserAgent = fmt.Sprintf("nicehttp/%s", getVersion())
+
+	// DefaultAttemptTimeout is the timeout of each attempt when the builder
+	// or a per host config does not set one. The default is NoTimeout, which
+	// disables the per attempt deadline; requests are then bounded only by the
+	// caller's context or the http.Client timeout.
+	DefaultAttemptTimeout time.Duration = NoTimeout
+
+	// DefaultMaxAttempts is the maximum number of attempts per request,
+	// including the first, when the builder or a per host config does not set
+	// one. The default is 10.
+	DefaultMaxAttempts = 10
+)
 
 // discardedBodyLimit is the maximum number of bytes read from the response body
 // of a request attempt that is going to be retried. Draining the body allows

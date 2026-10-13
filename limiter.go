@@ -63,8 +63,19 @@ func (rl *Limiter) Wait(ctx context.Context) error {
 	return nil
 }
 
-func (rl *Limiter) Done(retry bool, waitOverride time.Duration) error {
+// Done records the outcome of an attempt and releases the host's turn, which
+// Wait acquired. The outcome updates the backoff (see Backoff.Update), so
+// it determines how long the next caller waits.
+//
+// Every Wait that returns without an error must be followed by exactly one
+// Done, on every path, including errors and cancellation. The lock is handed
+// to waiters in FIFO order, so a missing Done blocks all later requests to
+// the host, and a second Done [panics / releases another caller's turn].
+// Calling it with defer right after a successful Wait is the safest pattern.
+//
+// If Wait returns an error, it did not take the lock and Done must not be
+// called.
+func (rl *Limiter) Done(retry bool, waitOverride time.Duration) {
 	rl.backoff.Update(retry, waitOverride)
 	rl.mu.Unlock()
-	return nil
 }
