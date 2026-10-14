@@ -330,3 +330,129 @@ func TestPerHostConfigHeaderRemoval(t *testing.T) {
 		t.Errorf("expected X-Drop on a host that does not remove it, got %q", got)
 	}
 }
+
+// TestPerHostConfigManagerHostValidation checks that a hand built manager, whose
+// Hosts map is exported, gets the same host name validation and normalization as
+// config loading.
+func TestPerHostConfigManagerHostValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		host    string
+		wantErr string
+	}{
+		{name: "plain name", host: "example.com"},
+		{name: "upper case and spaces", host: "  Example.COM  "},
+		{name: "trailing dot", host: "example.com."},
+		{name: "IPv6 literal", host: "::1"},
+		{name: "bracketed IPv6 literal", host: "[::1]"},
+		{name: "name with a port", host: "example.com:8080", wantErr: "must not contain a port"},
+		{name: "IPv6 literal with a port", host: "[::1]:8080", wantErr: "must not contain a port"},
+		{name: "empty name", host: "", wantErr: "must not be empty"},
+		{name: "only spaces", host: "   ", wantErr: "must not be empty"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager := &PerHostConfigManager{
+				Defaults: DefaultPerHostConfig.Clone(),
+				Hosts:    map[string]*PerHostConfig{test.host: {MaxAttempts: 7}},
+			}
+			runner, err := manager.CreateNicePerHostTransport()
+			if test.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected an error containing %q", test.wantErr)
+				}
+				if !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("expected an error containing %q, got %q", test.wantErr, err)
+				}
+				if !strings.Contains(err.Error(), "hosts[") {
+					t.Errorf("expected the error to name the host, got %q", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %s", err)
+			}
+
+			// The host config must be found by the name requests are matched on
+			host, err := runner.ForHost("example.com")
+			if err != nil {
+				t.Fatalf("while getting transport: %s", err)
+			}
+			if host == nil {
+				t.Fatal("expected a transport")
+			}
+		})
+	}
+}
+
+// TestPerHostConfigManagerHostMatching checks that a hand built host key is found
+// by the names a request can carry, so a key with stray spaces or brackets does
+// not silently miss.
+func TestPerHostConfigManagerHostMatching(t *testing.T) {
+	tests := []struct {
+		name    string
+		key     string
+		lookups []string
+	}{
+		{name: "spaces and case", key: " Example.COM ", lookups: []string{"example.com", "  EXAMPLE.com.  "}},
+		{name: "trailing dot", key: "example.com.", lookups: []string{"Example.com"}},
+		{name: "bracketed IPv6", key: "[::1]", lookups: []string{"::1"}},
+		{name: "plain IPv6", key: "::1", lookups: []string{"[::1]"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager := &PerHostConfigManager{
+				Defaults: DefaultPerHostConfig.Clone(),
+				Hosts:    map[string]*PerHostConfig{test.key: {MaxAttempts: 7}},
+			}
+			runner, err := manager.CreateNicePerHostTransport()
+			if err != nil {
+				t.Fatalf("unexpected error: %s", err)
+			}
+
+			// The lookup goes through the transport, which is where matching happens
+			matching, err := runner.ForHost(test.lookups[0])
+			if err != nil {
+				t.Fatalf("while getting transport: %s", err)
+			}
+			if matching == nil {
+				t.Fatal("expected a transport")
+			}
+			if matching.maxAttempts != 7 {
+				t.Errorf("expected the config of %q to be used, got maxAttempts %d", test.key, matching.maxAttempts)
+			}
+
+			transport, err := runner.ForHost("other.example.com")
+			if err != nil {
+				t.Fatalf("while getting transport: %s", err)
+			}
+			if transport == matching {
+				t.Error("expected a different transport for a host without config")
+			}
+			if transport.maxAttempts != DefaultPerHostConfig.MaxAttempts {
+				t.Errorf("expected the defaults for an unconfigured host, got maxAttempts %d", transport.maxAttempts)
+			}
+		})
+	}
+}
+
+// TestPerHostConfigManagerHostDuplicates checks that two keys that collide after
+// normalization are rejected, with the host named.
+func TestPerHostConfigManagerHostDuplicates(t *testing.T) {
+	manager := &PerHostConfigManager{
+		Defaults: DefaultPerHostConfig.Clone(),
+		Hosts: map[string]*PerHostConfig{
+			"example.com":      {MaxAttempts: 3},
+			"  EXAMPLE.com.  ": {MaxAttempts: 4},
+		},
+	}
+	_, err := manager.CreateNicePerHostTransport()
+	if err == nil {
+		t.Fatal("expected an error for hosts that collide after normalization")
+	}
+	if !strings.Contains(err.Error(), "duplicate host after normalization") {
+		t.Errorf("expected a duplicate error, got %q", err)
+	}
+}

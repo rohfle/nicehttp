@@ -181,8 +181,11 @@ func (t *NicePerHostTransport) RoundTrip(req *http.Request) (*http.Response, err
 
 // CreateNicePerHostTransport returns a NicePerHostTransport using a deep copy
 // of the manager, so later changes to the manager do not affect it. Defaults
-// must be set. Host names are normalized and duplicates after normalization
-// are an error; nil host entries use the defaults.
+// must be set. Host names are validated and normalized the same way as config
+// loading: a name with a port or an empty name is an error, case, surrounding
+// spaces, a trailing dot and the brackets of an IPv6 literal are ignored, and
+// names that collide after normalization are an error. Nil host entries use the
+// defaults.
 //
 // Transports are created lazily on the first request to each host and then
 // cached. The result must come from this method, since the zero value has no
@@ -199,6 +202,9 @@ func (m *PerHostConfigManager) CreateNicePerHostTransport() (*NicePerHostTranspo
 	}
 	seen := make(map[string]struct{}, len(m.Hosts))
 	for _, host := range slices.Sorted(maps.Keys(m.Hosts)) {
+		if err := validateHostName(host); err != nil {
+			return nil, fmt.Errorf("hosts[%s]: %w", host, err)
+		}
 		key := normalizeHost(host)
 		if _, dup := seen[key]; dup {
 			return nil, fmt.Errorf("hosts[%s]: duplicate host after normalization", host)
@@ -218,6 +224,10 @@ func (m *PerHostConfigManager) CreateNicePerHostTransport() (*NicePerHostTranspo
 // normalizeHost makes host names comparable: dns names are case insensitive,
 // and "example.com." is the same host as "example.com".
 func normalizeHost(host string) string {
+	host = strings.TrimSpace(host)
+	// An IPv6 literal may be written the way a URL spells it, in brackets,
+	// while URL.Hostname() returns it without them
+	host = strings.Trim(host, "[]")
 	return strings.TrimSuffix(strings.ToLower(host), ".")
 }
 
@@ -533,10 +543,12 @@ func tlsFromValue(value any, path string) (*tls.Config, error) {
 }
 
 func validateHostName(host string) error {
-	if normalizeHost(host) == "" {
+	// The normalized name is what requests are matched on, so validate that
+	normalized := normalizeHost(host)
+	if normalized == "" {
 		return errors.New("hostname must not be empty")
 	}
-	if _, err := netip.ParseAddr(host); err != nil && strings.Contains(host, ":") {
+	if _, err := netip.ParseAddr(normalized); err != nil && strings.Contains(normalized, ":") {
 		return errors.New("hostname must not contain a port")
 	}
 	return nil
