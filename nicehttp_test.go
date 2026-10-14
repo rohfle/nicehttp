@@ -123,7 +123,11 @@ func TestRoundTripperFirstRun(t *testing.T) {
 			case 1: // +0ms    test network error
 				return nil, errors.New("simulated network error")
 			case 2: // +151ms  test 429 error
-				retryTime := time.Now().UTC().Add(100 * time.Millisecond)
+				// A date in the past, so the wait is clamped to minWait. The
+				// date form only has second resolution, so a date built from
+				// now+100ms is in the past or up to a second in the future
+				// depending on the clock phase.
+				retryTime := time.Now().UTC().Add(-2 * time.Second)
 				header := make(http.Header)
 				header.Set("Retry-After", retryTime.Format(http.TimeFormat))
 				return &http.Response{
@@ -191,7 +195,9 @@ func TestRoundTripperSecondRun(t *testing.T) {
 
 	expectedBody := "This is the body"
 	expectedCalls := 5
-	deadlineDuration := 200 * time.Millisecond
+	// The retry loop ends on the attempt limit, so the deadline only has to be
+	// long enough that it cannot cut a sequence of 10-30ms waits short
+	deadlineDuration := 5 * time.Second
 
 	endpoint := &MockEndpoint{
 		CallCount: 0,
@@ -334,19 +340,19 @@ func TestRoundTripperFourthRun(t *testing.T) {
 			}
 			checkDeadline(t, req, callCount, endpoint.Deadline)
 
-			time.Sleep(500 * time.Millisecond)
-
-			switch callCount {
-			case 1:
-				return &http.Response{
-					StatusCode: 504,
-					Body:       io.NopCloser(strings.NewReader("Gateway Timeout")),
-					Header:     make(http.Header),
-				}, nil
-			default:
-				t.Fatalf("unhandled call %d", callCount)
+			// Return a retryable response only once the deadline has cut the
+			// attempt, so the retry must not happen. Waiting for the context
+			// rather than sleeping keeps this independent of the clock.
+			select {
+			case <-req.Context().Done():
+			case <-time.After(10 * time.Second): // the deadline is 250ms
+				t.Fatal("context timeout for request never occur")
 			}
-			return nil, errors.New("statement should not be reached")
+			return &http.Response{
+				StatusCode: 504,
+				Body:       io.NopCloser(strings.NewReader("Gateway Timeout")),
+				Header:     make(http.Header),
+			}, nil
 		},
 	}
 
@@ -611,7 +617,7 @@ func TestRoundTripperAttemptTimeoutBodyRead(t *testing.T) {
 		w.Header().Set("Content-Length", "5")
 		w.WriteHeader(200)
 		w.(http.Flusher).Flush()
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 		w.Write([]byte("hello"))
 	}))
 	defer server.Close()
@@ -1042,5 +1048,58 @@ func TestZeroValueTransport(t *testing.T) {
 	var manager PerHostConfigManager
 	if _, err := manager.ForHost("example.com"); err == nil {
 		t.Fatal("expected an error from a per host config manager without defaults")
+	}
+}
+
+// TestBuildDefaultTransport checks how the downstream is resolved when the builder
+// has none: a clone of http.DefaultTransport so each transport owns its pool, and a
+// replaced global used as is rather than a panic.
+func TestBuildDefaultTransport(t *testing.T) {
+	restore := http.DefaultTransport
+	defer func() { http.DefaultTransport = restore }()
+
+	response := &http.Response{
+		StatusCode: 200,
+		Body:       io.NopCloser(strings.NewReader("custom")),
+		Header:     make(http.Header),
+	}
+	http.DefaultTransport = &MockTransport{Endpoint: &MockEndpoint{
+		Handler: func(*MockEndpoint, int, *http.Request) (*http.Response, error) {
+			return response, nil
+		},
+	}}
+
+	transport := NewNiceTransportBuilder().Build()
+	resp, err := (&http.Client{Transport: transport}).Get("http://example.com")
+	if err != nil {
+		t.Fatalf("expected the replacement global to be used, got error: %s", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("while reading body: %s", err)
+	}
+	if string(body) != "custom" {
+		t.Errorf("expected the response of the replacement global, got %q", body)
+	}
+
+	http.DefaultTransport = restore
+
+	// Without a replacement, every build clones the default for its own pool
+	first := NewNiceTransportBuilder().Build()
+	second := NewNiceTransportBuilder().Build()
+	firstTransport, ok := first.downstreamTransport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected an *http.Transport, got %T", first.downstreamTransport)
+	}
+	secondTransport, ok := second.downstreamTransport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected an *http.Transport, got %T", second.downstreamTransport)
+	}
+	if firstTransport == secondTransport {
+		t.Error("expected each transport to have its own clone of the default transport")
+	}
+	if firstTransport == restore {
+		t.Error("expected a clone, not the global itself")
 	}
 }

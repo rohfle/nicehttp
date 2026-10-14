@@ -117,8 +117,7 @@ func (b *NiceTransportBuilder) Build() *NiceTransport {
 		b.attemptTimeout = DefaultAttemptTimeout
 	}
 	if b.downstreamTransport == nil {
-		transport := http.DefaultTransport.(*http.Transport).Clone()
-		b.downstreamTransport = transport
+		b.downstreamTransport = cloneDefaultTransport()
 	}
 	if b.limiter == nil {
 		b.limiter = &Limiter{

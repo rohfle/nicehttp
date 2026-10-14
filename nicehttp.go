@@ -146,7 +146,8 @@ type NiceTransport struct {
 	// A value of 0 means no timeout.
 	attemptTimeout time.Duration
 	// downstreamTransport allows override of downstream roundtripper
-	// Not specifying a value means http.DefaultTransport will be used
+	// Not setting a value will use a clone of http.DefaultTransport, or the
+	// global itself when it has been replaced with a custom RoundTripper
 	downstreamTransport http.RoundTripper
 	// RateLimter ensures a minimum rate limit between the start of requests
 	limiter *Limiter
@@ -163,6 +164,17 @@ func (s *NiceTransport) Clone() *NiceTransport {
 		snew.limiter = s.limiter.Clone()
 	}
 	return &snew
+}
+
+// cloneDefaultTransport returns a clone of http.DefaultTransport, so each
+// transport gets its own connection pool. A program that replaced the global
+// with a custom RoundTripper is used as is, since only an http.Transport can be
+// cloned.
+func cloneDefaultTransport() http.RoundTripper {
+	if base, ok := http.DefaultTransport.(*http.Transport); ok {
+		return base.Clone()
+	}
+	return http.DefaultTransport
 }
 
 // downstream returns the transport that requests are sent to. Not specifying a
