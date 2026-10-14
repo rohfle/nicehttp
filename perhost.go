@@ -235,7 +235,8 @@ func normalizeHost(host string) string {
 //   - attempt_timeout: positive duration string, for example "30s", or
 //     "none" (or "0s", or the number 0) for no attempt timeout
 //   - default_headers: map of header name to a string or list of strings.
-//     Headers are merged per name; an empty list removes the header.
+//     A name replaces the inherited header of the same name; an empty list or
+//     null removes it. An empty string is sent as an empty value.
 //   - backoff: map accepted by NewBackoffFromMap
 //   - tls: map accepting insecure_skip_verify (bool). It replaces the
 //     inherited tls config rather than merging with it.
@@ -336,9 +337,9 @@ func perHostConfigFromEntry(entry map[string]any, defaults *PerHostConfig, path 
 			if config.DefaultHeaders == nil {
 				config.DefaultHeaders = make(http.Header)
 			}
-			// Headers are merged per name. An empty value list removes the
-			// header, and is kept as an empty list so that it also removes
-			// the headers the builder would otherwise add
+			// Headers replace the inherited value per name. A removal is kept
+			// as an empty list, which also removes the header the builder
+			// would otherwise add
 			for _, name := range slices.Sorted(maps.Keys(headers)) {
 				config.DefaultHeaders.Del(name)
 				if len(headers[name]) == 0 {
@@ -481,6 +482,9 @@ func headersFromValue(value any, path string) (map[string][]string, error) {
 		}
 
 		switch v := headersData[name].(type) {
+		case nil:
+			// A null header, and an empty list below, both remove it
+			headers[canonical] = []string{}
 		case string:
 			headers[canonical] = []string{v}
 		case []string:

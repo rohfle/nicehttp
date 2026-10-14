@@ -276,3 +276,57 @@ func TestPerHostConfigCloneIsDeep(t *testing.T) {
 		t.Error("expected a cloned backoff, not a shared one")
 	}
 }
+
+// TestPerHostConfigHeaderRemoval checks that an empty list or null removes an
+// inherited header, that an empty string is sent as an empty value, and that
+// other names keep the inherited value.
+func TestPerHostConfigHeaderRemoval(t *testing.T) {
+	manager, err := NewPerHostConfigManagerFromMap(map[string]any{
+		"defaults": map[string]any{"default_headers": map[string]any{
+			"X-Keep":  "kept",
+			"X-Drop":  "dropped",
+			"X-Null":  "nulled",
+			"X-Empty": "empty",
+		}},
+		"hosts": map[string]any{"a.example.com": map[string]any{"default_headers": map[string]any{
+			"X-Drop":  []any{},
+			"X-Null":  nil,
+			"X-Empty": "",
+		}}},
+	})
+	if err != nil {
+		t.Fatalf("while loading config: %s", err)
+	}
+
+	config, err := manager.ForHost("a.example.com")
+	if err != nil {
+		t.Fatalf("while getting config: %s", err)
+	}
+	transport, err := config.CreateNiceTransport()
+	if err != nil {
+		t.Fatalf("while creating transport: %s", err)
+	}
+
+	headers := transport.defaultHeaders
+	if _, ok := headers["X-Drop"]; ok {
+		t.Errorf("expected an empty list to remove X-Drop, got %v", headers["X-Drop"])
+	}
+	if _, ok := headers["X-Null"]; ok {
+		t.Errorf("expected null to remove X-Null, got %v", headers["X-Null"])
+	}
+	if values, ok := headers["X-Empty"]; !ok || len(values) != 1 || values[0] != "" {
+		t.Errorf("expected one empty value for X-Empty, got %#v", values)
+	}
+	if got := headers.Get("X-Keep"); got != "kept" {
+		t.Errorf("expected the inherited X-Keep, got %q", got)
+	}
+
+	// Another host keeps every inherited header
+	other, err := manager.ForHost("b.example.com")
+	if err != nil {
+		t.Fatalf("while getting config: %s", err)
+	}
+	if got := other.DefaultHeaders.Get("X-Drop"); got != "dropped" {
+		t.Errorf("expected X-Drop on a host that does not remove it, got %q", got)
+	}
+}

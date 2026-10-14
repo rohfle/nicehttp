@@ -120,7 +120,7 @@ client := &http.Client{Transport: transport}
 - **Inheritance**: Each host entry inherits from defaults. Unset keys are inherited, and a missing or null host entry falls back entirely to defaults.
 - **Attempt Timeout** (`attempt_timeout`): Accepts a duration string, "`none`", "`0s`", or `0` for no timeout. (In Go, `TimeoutNotSet` inherits from `DefaultAttemptTimeout`, whereas `0` explicitly disables it).
 - **Max Attempts** (`max_attempts`): Accepts an integer, at least 1.
-- **Default Headers** (`default_headers`): Replaces the inherited value per header name; it does not append. An empty list removes a header, while `null` is an error.
+- **Default Headers** (`default_headers`): Replaces the inherited value per header name; it does not append. An empty list or `null` removes a header, and an empty string is sent as an empty value.
 - **Backoff** (`backoff`): Accepts `min_wait`, `max_wait`, and `coefficients`, and is merged onto the inherited backoff config.
 - **TLS** (`tls`): Supports `insecure_skip_verify` only. Unlike other fields, this replaces the inherited TLS configuration entirely rather than merging.
 - **Host Matching**: Host names are lowercased with any trailing dots ignored, and must not contain a port (requests match against `URL.Hostname()`). Unknown keys or invalid value types will result in an error.
