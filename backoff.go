@@ -10,6 +10,7 @@ import (
 	"time"
 )
 
+// Backoff is the exponential wait between request attempts.
 type Backoff struct {
 	last time.Time
 	wait time.Duration
@@ -19,6 +20,8 @@ type Backoff struct {
 	Coeff   BackoffCoefficients `json:"coefficients"`
 }
 
+// BackoffCoefficients scale a Backoff's wait: Success and Fail are the multipliers applied
+// after a success or a failure, and Jitter is how much the wait is randomised.
 type BackoffCoefficients struct {
 	Success float64 `json:"success"`
 	Fail    float64 `json:"fail"`
@@ -31,6 +34,7 @@ var DefaultBackoffCoefficients = BackoffCoefficients{
 	Jitter:  0.3,
 }
 
+// DefaultBackoff is the default backoff - 1s growing to 120s with default coefficients.
 var DefaultBackoff = NewBackoff(1*time.Second, 120*time.Second, DefaultBackoffCoefficients)
 
 // NewBackoffFromMap builds a Backoff from a config map. Keys that are absent
@@ -119,6 +123,7 @@ func floatFromValue(value any, path string) (float64, error) {
 	return f, nil
 }
 
+// NewBackoff returns a Backoff that waits between minWait and maxWait.
 func NewBackoff(minWait time.Duration, maxWait time.Duration, coeff BackoffCoefficients) *Backoff {
 	return &Backoff{
 		last:    time.Now().Add(-minWait),
@@ -181,14 +186,17 @@ func (adj *Backoff) Update(fail bool, newWait time.Duration) time.Duration {
 	return adj.wait
 }
 
+// UntilNext returns how long to wait from now until the next attempt.
 func (adj *Backoff) UntilNext() time.Duration {
 	return time.Until(adj.last) + adj.wait
 }
 
+// Next returns the time of the next attempt.
 func (adj *Backoff) Next() time.Time {
 	return adj.last.Add(adj.wait)
 }
 
+// Clone returns a copy of the backoff, reset to its minimum wait.
 func (adj *Backoff) Clone() *Backoff {
 	copy := *adj
 	copy.last = time.Now().Add(-copy.MinWait)

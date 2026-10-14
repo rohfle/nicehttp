@@ -7,12 +7,14 @@ import (
 	"github.com/neilotoole/fifomu"
 )
 
+// Limiter is a FIFO lock that enforces backoff between requests.
 type Limiter struct {
 	mu fifomu.Mutex
 
 	backoff *Backoff
 }
 
+// NewLimiter returns a Limiter with provided backoff, or DefaultBackoff when backoff is nil.
 func NewLimiter(backoff *Backoff) *Limiter {
 	if backoff == nil {
 		// A nil backoff means the default backoff is used
@@ -23,6 +25,7 @@ func NewLimiter(backoff *Backoff) *Limiter {
 	}
 }
 
+// Clone returns a copy of the limiter with its own lock and cloned backoff.
 func (rl *Limiter) Clone() *Limiter {
 	return &Limiter{
 		backoff: rl.backoff.Clone(),

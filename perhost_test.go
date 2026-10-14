@@ -1,6 +1,9 @@
 package nicehttp
 
 import (
+	"crypto/tls"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -96,5 +99,180 @@ func TestPerHostConfigAttemptTimeoutInvalid(t *testing.T) {
 			continue
 		}
 		t.Logf("attempt_timeout %#v -> %s", value, err)
+	}
+}
+
+// TestPerHostConfigFromMapInheritance checks that a host inherits the keys it does
+// not set, that an empty or nil host entry falls back to the defaults, and that the
+// inheritance is a snapshot: changing the defaults afterwards does not affect hosts
+// that were already parsed.
+func TestPerHostConfigFromMapInheritance(t *testing.T) {
+	manager, err := NewPerHostConfigManagerFromMap(map[string]any{
+		"defaults": map[string]any{
+			"attempt_timeout": "30s",
+			"max_attempts":    3,
+			"default_headers": map[string]any{"X-Default": "yes"},
+		},
+		"hosts": map[string]any{
+			"Sub.EXAMPLE.com.":  map[string]any{"max_attempts": 7},
+			"empty.example.com": map[string]any{},
+			"nil.example.com":   nil,
+		},
+	})
+	if err != nil {
+		t.Fatalf("while loading config: %s", err)
+	}
+
+	host, err := manager.ForHost("sub.example.com") // key is normalized
+	if err != nil {
+		t.Fatalf("while getting config: %s", err)
+	}
+	if host.MaxAttempts != 7 || host.AttemptTimeout != 30*time.Second {
+		t.Errorf("expected 7 attempts and a 30s timeout, got %d and %v", host.MaxAttempts, host.AttemptTimeout)
+	}
+	if host.DefaultHeaders.Get("X-Default") != "yes" || host.DefaultHeaders.Get("User-Agent") != DefaultUserAgent {
+		t.Errorf("expected inherited headers, got %v", host.DefaultHeaders)
+	}
+
+	// An empty entry, a nil entry and an unconfigured host all follow the defaults
+	for _, name := range []string{"empty.example.com", "nil.example.com", "other.example.com"} {
+		config, err := manager.ForHost(name)
+		if err != nil {
+			t.Fatalf("while getting config for %s: %s", name, err)
+		}
+		if config.MaxAttempts != 3 || config.AttemptTimeout != 30*time.Second {
+			t.Errorf("%s: expected the defaults, got %d attempts and %v", name, config.MaxAttempts, config.AttemptTimeout)
+		}
+	}
+
+	// Inheritance is a snapshot: changing the defaults does not reach parsed hosts
+	manager.Defaults.MaxAttempts = 99
+	manager.Defaults.DefaultHeaders.Set("X-Default", "changed")
+	config, err := manager.ForHost("empty.example.com")
+	if err != nil {
+		t.Fatalf("while getting config: %s", err)
+	}
+	if config.MaxAttempts != 3 || config.DefaultHeaders.Get("X-Default") != "yes" {
+		t.Errorf("expected the parsed snapshot, got %d attempts and %v", config.MaxAttempts, config.DefaultHeaders)
+	}
+}
+
+// TestPerHostConfigFromMapTLSAndBackoff checks that tls: null drops the inherited
+// tls config, and that a backoff entry merges onto the inherited backoff.
+func TestPerHostConfigFromMapTLSAndBackoff(t *testing.T) {
+	manager, err := NewPerHostConfigManagerFromMap(map[string]any{
+		"defaults": map[string]any{
+			"tls":     map[string]any{"insecure_skip_verify": true},
+			"backoff": map[string]any{"min_wait": "2s", "max_wait": "30s"},
+		},
+		"hosts": map[string]any{
+			"plain.example.com":      map[string]any{"tls": nil},
+			"fast.example.com":       map[string]any{"backoff": map[string]any{"min_wait": "10s"}},
+			"inheriting.example.com": map[string]any{},
+		},
+	})
+	if err != nil {
+		t.Fatalf("while loading config: %s", err)
+	}
+
+	if !manager.Defaults.TLS.InsecureSkipVerify {
+		t.Error("expected the defaults to skip verification")
+	}
+	if got := manager.Hosts["plain.example.com"].TLS; got != nil {
+		t.Errorf("expected tls: null to drop the inherited tls config, got %v", got)
+	}
+	if got := manager.Hosts["inheriting.example.com"].TLS; got == nil || !got.InsecureSkipVerify {
+		t.Errorf("expected the inherited tls config, got %v", got)
+	}
+
+	backoff := manager.Hosts["fast.example.com"].Backoff
+	if backoff.MinWait != 10*time.Second || backoff.MaxWait != 30*time.Second {
+		t.Errorf("expected min_wait 10s inherited with max_wait 30s, got %v..%v", backoff.MinWait, backoff.MaxWait)
+	}
+	if backoff.Coeff != manager.Defaults.Backoff.Coeff {
+		t.Errorf("expected inherited coefficients, got %+v", backoff.Coeff)
+	}
+}
+
+// TestPerHostConfigFromMapErrors checks that a malformed document is rejected with
+// a message naming the offending key.
+func TestPerHostConfigFromMapErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		data map[string]any
+		want string
+	}{
+		{"unknown top level key", map[string]any{"nope": 1}, "nope: unknown key"},
+		{"defaults not a map", map[string]any{"defaults": "x"}, "defaults: must be a map"},
+		{"hosts not a map", map[string]any{"hosts": []any{}}, "hosts: must be a map"},
+		{"host entry not a map", map[string]any{"hosts": map[string]any{"a.example.com": "x"}}, "hosts[a.example.com]: must be a map"},
+		{"host with a port", map[string]any{"hosts": map[string]any{"a.example.com:8080": map[string]any{}}}, "hostname must not contain a port"},
+		{"host with no name", map[string]any{"hosts": map[string]any{"": map[string]any{}}}, "hostname must not be empty"},
+		{"duplicate host after normalization", map[string]any{"hosts": map[string]any{
+			"Example.com":  map[string]any{},
+			"example.com.": map[string]any{},
+		}}, "duplicate of another host after normalization"},
+		{"duplicate header after canonicalization", map[string]any{"defaults": map[string]any{
+			"default_headers": map[string]any{"x-foo": "1", "X-Foo": "2"},
+		}}, "duplicate header after canonicalization"},
+		{"unknown config key", map[string]any{"defaults": map[string]any{"nope": 1}}, "defaults.nope: unknown key"},
+		{"max_attempts not a number", map[string]any{"defaults": map[string]any{"max_attempts": "three"}}, "max_attempts: must be a whole number"},
+		{"max_attempts zero", map[string]any{"defaults": map[string]any{"max_attempts": 0}}, "must be a whole number between 1 and"},
+		{"max_attempts fractional", map[string]any{"defaults": map[string]any{"max_attempts": 1.5}}, "must be a whole number between 1 and"},
+		{"default_headers not a map", map[string]any{"defaults": map[string]any{"default_headers": "x"}}, "default_headers: must be a map"},
+		{"header value wrong type", map[string]any{"defaults": map[string]any{
+			"default_headers": map[string]any{"X-Foo": 1},
+		}}, "[X-Foo]: must be a string or a list of strings"},
+		{"header list item wrong type", map[string]any{"defaults": map[string]any{
+			"default_headers": map[string]any{"X-Foo": []any{1}},
+		}}, "[X-Foo]: value must be a string"},
+		{"backoff not a map", map[string]any{"defaults": map[string]any{"backoff": "x"}}, "backoff: must be a map"},
+		{"tls not a map", map[string]any{"defaults": map[string]any{"tls": "x"}}, "tls: must be a map"},
+		{"tls unknown key", map[string]any{"defaults": map[string]any{"tls": map[string]any{"ca_file": "x"}}}, "tls.ca_file: unknown key"},
+		{"tls wrong type", map[string]any{"defaults": map[string]any{"tls": map[string]any{"insecure_skip_verify": "yes"}}}, "tls.insecure_skip_verify: must be a boolean"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := NewPerHostConfigManagerFromMap(test.data)
+			if err == nil {
+				t.Fatalf("expected an error for %#v", test.data)
+			}
+			if !strings.Contains(err.Error(), test.want) {
+				t.Errorf("expected an error containing %q, got %q", test.want, err)
+			}
+		})
+	}
+}
+
+// TestPerHostConfigCloneIsDeep checks that a clone shares no state with the config
+// it was made from.
+func TestPerHostConfigCloneIsDeep(t *testing.T) {
+	config := PerHostConfig{
+		DefaultHeaders: http.Header{"X-Foo": {"1"}},
+		Backoff:        NewBackoff(time.Second, time.Minute, DefaultBackoffCoefficients),
+		TLS:            &tls.Config{},
+		MaxAttempts:    3,
+	}
+
+	clone := config.Clone()
+	config.DefaultHeaders.Set("X-Foo", "2")
+	config.Backoff.MinWait = time.Hour
+	config.TLS.InsecureSkipVerify = true
+	config.MaxAttempts = 9
+
+	if got := clone.DefaultHeaders.Get("X-Foo"); got != "1" {
+		t.Errorf("expected the cloned headers, got %q", got)
+	}
+	if clone.Backoff.MinWait != time.Second {
+		t.Errorf("expected the cloned backoff, got %v", clone.Backoff.MinWait)
+	}
+	if clone.TLS.InsecureSkipVerify {
+		t.Error("expected the cloned tls config")
+	}
+	if clone.MaxAttempts != 3 {
+		t.Errorf("expected the cloned max attempts, got %d", clone.MaxAttempts)
+	}
+	if clone.Backoff == config.Backoff {
+		t.Error("expected a cloned backoff, not a shared one")
 	}
 }

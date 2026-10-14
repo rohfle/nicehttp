@@ -32,10 +32,12 @@ func getVersion() string {
 	return "unknown"
 }
 
-// NoTimeout means the request will wait forever to complete
-// TimeoutNotSet means the timeout is unset, so DefaultAttemptTimeout applies
-const NoTimeout time.Duration = 0
-const TimeoutNotSet time.Duration = -1
+const (
+	// NoTimeout means the request will wait forever to complete
+	NoTimeout time.Duration = 0
+	// TimeoutNotSet means the timeout is unset, so DefaultAttemptTimeout applies
+	TimeoutNotSet time.Duration = -1
+)
 
 // Package defaults. They are read when a builder or per host config is
 // created or built, so changing one affects only transports created
@@ -102,6 +104,8 @@ func (b *cancelOnCloseBody) Close() error {
 	return err
 }
 
+// NiceTransport is an http.RoundTripper that limits the request rate, retries failures and
+// adds default headers. Create it with NiceTransportBuilder.
 type NiceTransport struct {
 	// Headers added to every request
 	// Include headers like "User-Agent" and "Authorization" here
@@ -123,6 +127,7 @@ type NiceTransport struct {
 	limiter *Limiter
 }
 
+// Clone returns a copy of the transport, with cloned headers, limiter and backoff.
 func (s *NiceTransport) Clone() *NiceTransport {
 	var snew NiceTransport
 	snew.defaultHeaders = s.defaultHeaders.Clone()

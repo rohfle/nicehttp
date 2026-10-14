@@ -14,6 +14,8 @@ import (
 	"time"
 )
 
+// DefaultPerHostConfig is config used for hosts that have none: the package defaults
+// (DefaultAttemptTimeout, DefaultMaxAttempts, the default User-Agent) and a clone of DefaultBackoff.
 var DefaultPerHostConfig = PerHostConfig{
 	Backoff:        DefaultBackoff.Clone(),
 	AttemptTimeout: DefaultAttemptTimeout,
@@ -23,6 +25,8 @@ var DefaultPerHostConfig = PerHostConfig{
 	},
 }
 
+// PerHostConfig is the configuration of a single host. CreateNiceTransport applies it on
+// top of builder defaults.
 type PerHostConfig struct {
 	DefaultHeaders http.Header
 	Backoff        *Backoff
@@ -38,17 +42,21 @@ type PerHostConfig struct {
 	MaxAttempts int
 }
 
+// PerHostConfigManager holds a default config and the per host overrides.
 type PerHostConfigManager struct {
 	Defaults *PerHostConfig
 	Hosts    map[string]*PerHostConfig
 }
 
+// NicePerHostTransport is an http.RoundTripper that uses one transport per host, created on
+// the first request to that host.
 type NicePerHostTransport struct {
 	mu         sync.RWMutex
 	transports map[string]*NiceTransport
 	config     *PerHostConfigManager
 }
 
+// Clone returns a deep copy of the config.
 func (c *PerHostConfig) Clone() *PerHostConfig {
 	cfg := *c
 	if cfg.Backoff != nil {
@@ -63,6 +71,7 @@ func (c *PerHostConfig) Clone() *PerHostConfig {
 	return &cfg
 }
 
+// CreateNiceTransport builds the transport for this config, combined with builder defaults.
 func (c *PerHostConfig) CreateNiceTransport() (*NiceTransport, error) {
 	builder := NewNiceTransportBuilder()
 	if len(c.DefaultHeaders) > 0 {
@@ -93,6 +102,7 @@ func (c *PerHostConfig) CreateNiceTransport() (*NiceTransport, error) {
 	return builder.Build(), nil
 }
 
+// ForHost returns a copy of the config for host, or of the defaults when host is not configured.
 func (m *PerHostConfigManager) ForHost(host string) (*PerHostConfig, error) {
 	if m == nil || m.Defaults == nil {
 		return nil, fmt.Errorf("no default per host config")
@@ -105,6 +115,7 @@ func (m *PerHostConfigManager) ForHost(host string) (*PerHostConfig, error) {
 	return m.Defaults.Clone(), nil
 }
 
+// ForHost returns the transport for host, creating and caching it on first use.
 func (t *NicePerHostTransport) ForHost(host string) (*NiceTransport, error) {
 	if t.config == nil {
 		return nil, errors.New("per host transport has no config, create it with CreateNicePerHostTransport")
@@ -150,6 +161,7 @@ func (t *NicePerHostTransport) CloseIdleConnections() {
 	}
 }
 
+// RoundTrip dispatches the request to the transport of its host.
 func (t *NicePerHostTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req == nil || req.URL == nil || req.URL.Hostname() == "" {
 		if req != nil && req.Body != nil {
