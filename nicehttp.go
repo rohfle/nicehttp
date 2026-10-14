@@ -194,13 +194,23 @@ func (rt *NiceTransport) CloseIdleConnections() {
 	}
 }
 
-func shouldRetryRequest(resp *http.Response, err error) bool {
+// shouldRetryRequest reports whether the request may be sent again after an
+// attempt failed or returned a retryable response.
+//
+// origReq is the request given by the caller, not the per attempt clone: the
+// attempt timeout cancels the clone's context, and that timeout is exactly one
+// of the cases that should be retried.
+func shouldRetryRequest(origReq *http.Request, resp *http.Response, err error) bool {
+	// The caller gave up, so a retry cannot succeed
+	if origReq.Context().Err() != nil {
+		return false
+	}
+
 	if err != nil {
-		// Retry if a network error has occurred, such as
-		// - connection timeouts,
-		// - dns resolution errors,
-		// - connection reset
-		return true
+		// A network error, such as connection timeout, dns resolution error or
+		// connection reset, does not say whether the request reached the
+		// server, so only a request that is safe to replay is retried
+		return replayable(origReq)
 	}
 
 	if resp == nil {
@@ -208,18 +218,43 @@ func shouldRetryRequest(resp *http.Response, err error) bool {
 	}
 
 	switch resp.StatusCode {
-	case 429, 503, 504:
-		// The request can be retried with backoff if its status is one of:
-		// - 429 Too Many Requests
-		// - 503 Service Unavailable
-		// - 504 Gateway Timeout
+	case 429, 503:
+		// The server says it did not process the request
 		return true
+	case 504:
+		// The upstream may have processed the request before the gateway
+		// timed out
+		return replayable(origReq)
 	}
 
 	return false
 }
 
-// RoundTrip is a custom implementation that handles backoff, error retries and done context
+// replayable reports whether sending the request twice is harmless: an
+// idempotent method, a request the server can deduplicate with an
+// Idempotency-Key, or an explicit opt in from the caller.
+func replayable(req *http.Request) bool {
+	switch req.Method {
+	case http.MethodGet, http.MethodHead, http.MethodPut,
+		http.MethodDelete, http.MethodOptions, http.MethodTrace:
+		return true
+	}
+	return req.Header.Get("Idempotency-Key") != "" || GetRetryNonIdempotentFromContext(req.Context())
+}
+
+// RoundTrip is a custom implementation that handles backoff, error retries and done context.
+//
+// A failed attempt is retried up to maxAttempts. An attempt timeout is always
+// retried, while a cancelled or expired caller context never is. After a
+// transport error or a 504 Gateway Timeout, which do not say whether the
+// request reached the server, only a request that is safe to replay is retried:
+// an idempotent method, a request carrying an Idempotency-Key, or a request
+// whose context comes from SetRetryNonIdempotentInContext. A 429 or 503 is
+// retried for any method, since the server answered that it did not process the
+// request.
+//
+// A response that arrives after the caller's context is done is returned as is,
+// rather than retried, and the cancellation surfaces when its body is read.
 func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error) {
 	if rt.limiter == nil {
 		// A transport without a limiter cannot back off between attempts
@@ -336,7 +371,7 @@ func (rt *NiceTransport) roundTripAttempt(origCtx context.Context, origReq *http
 	resp, err = rt.downstream().RoundTrip(req)
 
 	// Determine if the request should be retried
-	needsRetry = shouldRetryRequest(resp, err)
+	needsRetry = shouldRetryRequest(origReq, resp, err)
 	retryAfter = parseRetryAfterHeader(resp)
 
 	if lastAttempt || !needsRetry {

@@ -126,6 +126,21 @@ client := &http.Client{Transport: transport}
 - **Host Matching**: Host names are lowercased with any trailing dots ignored, and must not contain a port (requests match against `URL.Hostname()`). Unknown keys or invalid value types will result in an error.
 
 
+## Retries
+
+An attempt is retried up to `maxAttempts`. An attempt timeout is always retried, and a cancelled or expired
+caller context never is.
+
+After a transport error or a `504 Gateway Timeout` the client cannot know whether the request reached the
+server, so only a request that is safe to replay is retried:
+
+- safe methods: `GET`, `HEAD`, `PUT`, `DELETE`, `OPTIONS`, `TRACE`
+- a `POST` or `PATCH` carrying an `Idempotency-Key` header
+- a `POST` or `PATCH` whose context comes from `SetRetryNonIdempotentInContext`
+
+A `429 Too Many Requests`, honouring `Retry-After`, or a `503 Service Unavailable` is retried for any method,
+since the server answered that it did not process the request.
+
 ## License
 
 MIT License

@@ -162,6 +162,9 @@ func TestRoundTripperFirstRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("http.NewRequestWithContext failed: %s", err)
 	}
+	// A POST is only retried after a transport error when it is marked safe to
+	// replay, which is what this header tells the server
+	req.Header.Set("Idempotency-Key", "test-first-run")
 
 	resp, err := client.Do(req)
 	if err == nil {
@@ -340,19 +343,17 @@ func TestRoundTripperFourthRun(t *testing.T) {
 			}
 			checkDeadline(t, req, callCount, endpoint.Deadline)
 
-			// Return a retryable response only once the deadline has cut the
-			// attempt, so the retry must not happen. Waiting for the context
-			// rather than sleeping keeps this independent of the clock.
+			// Block until the deadline cuts the attempt, then report the
+			// cancellation the way a real transport would, rather than
+			// handing back a response for a dead context. Waiting for the
+			// context rather than sleeping keeps this independent of the clock.
 			select {
 			case <-req.Context().Done():
+				return nil, req.Context().Err()
 			case <-time.After(10 * time.Second): // the deadline is 250ms
 				t.Fatal("context timeout for request never occur")
 			}
-			return &http.Response{
-				StatusCode: 504,
-				Body:       io.NopCloser(strings.NewReader("Gateway Timeout")),
-				Header:     make(http.Header),
-			}, nil
+			return nil, errors.New("statement should not be reached")
 		},
 	}
 
@@ -1101,5 +1102,234 @@ func TestBuildDefaultTransport(t *testing.T) {
 	}
 	if firstTransport == restore {
 		t.Error("expected a clone, not the global itself")
+	}
+}
+
+// TestRoundTripperNonIdempotent checks which methods a transport error is
+// retried for, and the two ways a POST can opt in to being replayed.
+func TestRoundTripperNonIdempotent(t *testing.T) {
+	tests := []struct {
+		name      string
+		method    string
+		headers   http.Header
+		optIn     bool
+		wantCalls int
+	}{
+		{name: "GET", method: http.MethodGet, wantCalls: 2},
+		{name: "HEAD", method: http.MethodHead, wantCalls: 2},
+		{name: "PUT", method: http.MethodPut, wantCalls: 2},
+		{name: "DELETE", method: http.MethodDelete, wantCalls: 2},
+		{name: "OPTIONS", method: http.MethodOptions, wantCalls: 2},
+		{name: "POST", method: http.MethodPost, wantCalls: 1},
+		{name: "PATCH", method: http.MethodPatch, wantCalls: 1},
+		{
+			name:      "POST with Idempotency-Key",
+			method:    http.MethodPost,
+			headers:   http.Header{"Idempotency-Key": {"abc"}},
+			wantCalls: 2,
+		},
+		{name: "POST with context opt in", method: http.MethodPost, optIn: true, wantCalls: 2},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			endpoint := &MockEndpoint{
+				Handler: func(_ *MockEndpoint, callCount int, _ *http.Request) (*http.Response, error) {
+					if callCount == 1 {
+						return nil, errors.New("simulated network error")
+					}
+					return &http.Response{
+						StatusCode: 200,
+						Body:       io.NopCloser(strings.NewReader("OK")),
+						Header:     make(http.Header),
+					}, nil
+				},
+			}
+			settings := &NiceTransport{
+				limiter:     &Limiter{backoff: NewBackoff(time.Millisecond, time.Millisecond, DefaultBackoffCoefficients)},
+				maxAttempts: 3,
+			}
+			client := createClientWithEndpoint(settings, endpoint)
+
+			ctx := context.Background()
+			if test.optIn {
+				ctx = SetRetryNonIdempotentInContext(ctx)
+			}
+			req, err := http.NewRequestWithContext(ctx, test.method, "http://example.com", nil)
+			if err != nil {
+				t.Fatalf("http.NewRequestWithContext failed: %s", err)
+			}
+			req.Header = test.headers.Clone()
+			if req.Header == nil {
+				req.Header = make(http.Header)
+			}
+
+			resp, err := client.Do(req)
+			if test.wantCalls == 2 {
+				if err != nil {
+					t.Fatalf("expected the retry to succeed, got error: %s", err)
+				}
+				resp.Body.Close()
+			} else {
+				if err == nil {
+					resp.Body.Close()
+					t.Fatal("expected the transport error to be final")
+				}
+			}
+			if endpoint.CallCount != test.wantCalls {
+				t.Fatalf("expected %d calls, got %d", test.wantCalls, endpoint.CallCount)
+			}
+		})
+	}
+}
+
+// TestRoundTripperNonIdempotentStatus checks that a 429 or 503 is retried for
+// any method, while a 504 Gateway Timeout is only retried when a replay is safe.
+func TestRoundTripperNonIdempotentStatus(t *testing.T) {
+	tests := []struct {
+		name      string
+		method    string
+		status    int
+		wantCalls int
+	}{
+		{name: "POST 429", method: http.MethodPost, status: 429, wantCalls: 2},
+		{name: "POST 503", method: http.MethodPost, status: 503, wantCalls: 2},
+		{name: "POST 504", method: http.MethodPost, status: 504, wantCalls: 1},
+		{name: "PUT 504", method: http.MethodPut, status: 504, wantCalls: 2},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			endpoint := &MockEndpoint{
+				Handler: func(_ *MockEndpoint, callCount int, _ *http.Request) (*http.Response, error) {
+					status := 200
+					if callCount == 1 {
+						status = test.status
+					}
+					return &http.Response{
+						StatusCode: status,
+						Body:       io.NopCloser(strings.NewReader("body")),
+						Header:     make(http.Header),
+					}, nil
+				},
+			}
+			settings := &NiceTransport{
+				limiter:     &Limiter{backoff: NewBackoff(time.Millisecond, time.Millisecond, DefaultBackoffCoefficients)},
+				maxAttempts: 3,
+			}
+			client := createClientWithEndpoint(settings, endpoint)
+
+			req, err := http.NewRequest(test.method, "http://example.com", nil)
+			if err != nil {
+				t.Fatalf("http.NewRequest failed: %s", err)
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("unexpected error: %s", err)
+			}
+			defer resp.Body.Close()
+			if endpoint.CallCount != test.wantCalls {
+				t.Fatalf("expected %d calls, got %d", test.wantCalls, endpoint.CallCount)
+			}
+			if test.wantCalls == 1 && resp.StatusCode != test.status {
+				t.Errorf("expected the final response to be %d, got %d", test.status, resp.StatusCode)
+			}
+		})
+	}
+}
+
+// TestRoundTripperNoRetryAfterCancel checks that a caller who cancels mid attempt
+// gets no retry, since the retry could not succeed either.
+func TestRoundTripperNoRetryAfterCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	endpoint := &MockEndpoint{
+		Handler: func(_ *MockEndpoint, _ int, req *http.Request) (*http.Response, error) {
+			cancel() // the caller gives up while this attempt is in flight
+			return nil, req.Context().Err()
+		},
+	}
+	settings := &NiceTransport{
+		limiter:     &Limiter{backoff: NewBackoff(time.Millisecond, time.Millisecond, DefaultBackoffCoefficients)},
+		maxAttempts: 3,
+	}
+	client := createClientWithEndpoint(settings, endpoint)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://example.com", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequestWithContext failed: %s", err)
+	}
+
+	if _, err := client.Do(req); err == nil {
+		t.Fatal("expected an error from the cancelled request")
+	} else if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %s", err)
+	}
+	if endpoint.CallCount != 1 {
+		t.Fatalf("expected 1 call, got %d", endpoint.CallCount)
+	}
+}
+
+// TestShouldRetryRequest pins the retry rule table directly, since the limiter
+// also refuses a request whose context is done, which would mask the guard in an
+// end to end test.
+func TestShouldRetryRequest(t *testing.T) {
+	request := func(method string, opts ...func(*http.Request)) *http.Request {
+		req, err := http.NewRequest(method, "http://example.com", nil)
+		if err != nil {
+			t.Fatalf("http.NewRequest failed: %s", err)
+		}
+		for _, opt := range opts {
+			opt(req)
+		}
+		return req
+	}
+	cancelled := func(req *http.Request) {
+		ctx, cancel := context.WithCancel(req.Context())
+		cancel()
+		*req = *req.WithContext(ctx)
+	}
+	optedIn := func(req *http.Request) {
+		*req = *req.WithContext(SetRetryNonIdempotentInContext(req.Context()))
+	}
+	withKey := func(req *http.Request) { req.Header.Set("Idempotency-Key", "abc") }
+
+	response := func(status int) *http.Response {
+		return &http.Response{StatusCode: status, Header: make(http.Header)}
+	}
+	networkError := errors.New("simulated network error")
+
+	tests := []struct {
+		name string
+		req  *http.Request
+		resp *http.Response
+		err  error
+		want bool
+	}{
+		{"network error, GET", request(http.MethodGet), nil, networkError, true},
+		{"network error, PUT", request(http.MethodPut), nil, networkError, true},
+		{"network error, OPTIONS", request(http.MethodOptions), nil, networkError, true},
+		{"network error, POST", request(http.MethodPost), nil, networkError, false},
+		{"network error, PATCH", request(http.MethodPatch), nil, networkError, false},
+		{"network error, POST with key", request(http.MethodPost, withKey), nil, networkError, true},
+		{"network error, POST opted in", request(http.MethodPost, optedIn), nil, networkError, true},
+		{"network error after cancel", request(http.MethodGet, cancelled), nil, networkError, false},
+		{"429 after cancel", request(http.MethodGet, cancelled), response(429), nil, false},
+		{"429, POST", request(http.MethodPost), response(429), nil, true},
+		{"503, POST", request(http.MethodPost), response(503), nil, true},
+		{"504, PUT", request(http.MethodPut), response(504), nil, true},
+		{"504, POST", request(http.MethodPost), response(504), nil, false},
+		{"504, POST with key", request(http.MethodPost, withKey), response(504), nil, true},
+		{"200, GET", request(http.MethodGet), response(200), nil, false},
+		{"no response and no error", request(http.MethodGet), nil, nil, false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := shouldRetryRequest(test.req, test.resp, test.err); got != test.want {
+				t.Errorf("expected %v, got %v", test.want, got)
+			}
+		})
 	}
 }
