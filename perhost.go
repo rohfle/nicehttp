@@ -43,16 +43,20 @@ type PerHostConfig struct {
 	MaxAttempts int
 }
 
-// PerHostConfigManager holds a default config and the per host overrides.
+// PerHostConfigManager manages default configurations and per-host overrides.
+// Hosts are either defined (present in Hosts) or dynamic (absent, falling back to Defaults).
 type PerHostConfigManager struct {
 	Defaults *PerHostConfig
 	Hosts    map[string]*PerHostConfig
 }
 
-// transportEntry is a cached transport for one host. dynamic reports whether the
-// host has no entry in the config, so it was created for a host that appeared
-// dynamically. lastSeq is the seq value of the last lookup of the entry, so the
-// smallest lastSeq is the least recently used entry.
+// maxDynamicTransports bounds dynamic host transports to prevent unbounded growth
+// of hosts not defined in the config. Defined hosts are never evicted.
+const maxDynamicTransports = 256
+
+// transportEntry caches a transport for a single host.
+// dynamic indicates whether the host was absent from the config and falls back to defaults.
+// lastSeq records the sequence number when the entry was last used.
 type transportEntry struct {
 	transport *NiceTransport
 	dynamic   bool
@@ -156,7 +160,32 @@ func (t *NicePerHostTransport) ForHost(host string) (*NiceTransport, error) {
 	entry := &transportEntry{transport: transport, dynamic: usedDefaults}
 	entry.lastSeq.Store(t.seq.Add(1))
 	t.transports[host] = entry
+	if usedDefaults {
+		t.evictLocked()
+	}
 	return transport, nil
+}
+
+// evictLocked evicts LRU dynamic transports when maxDynamicTransports has been reached.
+// The evicted transport is not closed because active requests may still use it;
+// its idle connections expire via their own timeout.
+// t.mu must be held.
+func (t *NicePerHostTransport) evictLocked() {
+	var victim string
+	var victimSeq uint64
+	dynamic := 0
+	for host, entry := range t.transports {
+		if !entry.dynamic {
+			continue
+		}
+		dynamic++
+		if seq := entry.lastSeq.Load(); victim == "" || seq < victimSeq {
+			victim, victimSeq = host, seq
+		}
+	}
+	if dynamic > maxDynamicTransports {
+		delete(t.transports, victim)
+	}
 }
 
 // CloseIdleConnections closes idle connections in all the transports created
@@ -191,16 +220,16 @@ func (t *NicePerHostTransport) RoundTrip(req *http.Request) (*http.Response, err
 }
 
 // CreateNicePerHostTransport returns a NicePerHostTransport using a deep copy
-// of the manager, so later changes to the manager do not affect it. Defaults
-// must be set. Host names are validated and normalized the same way as config
-// loading: a name with a port or an empty name is an error, case, surrounding
-// spaces, a trailing dot and the brackets of an IPv6 literal are ignored, and
-// names that collide after normalization are an error. Nil host entries use the
-// defaults.
+// of the manager. Defaults must be set.
 //
-// Transports are created lazily on the first request to each host and then
-// cached. The result must come from this method, since the zero value has no
-// config.
+// Host names are validated and normalized: case, surrounding spaces, trailing dots,
+// and IPv6 brackets are ignored. Names with ports, empty names, or collisions
+// after normalization return an error. Nil host entries fall back to defaults.
+//
+// Transports are created lazily on first request and cached. Defined hosts are
+// stored permanently, while dynamic hosts are bounded by maxDynamicTransports
+// using LRU eviction. NicePerHostTransport must be initialized via this method,
+// as the zero value has no config.
 func (m *PerHostConfigManager) CreateNicePerHostTransport() (*NicePerHostTransport, error) {
 	if m.Defaults == nil {
 		return nil, errors.New("no default per host config")
@@ -243,32 +272,28 @@ func normalizeHost(host string) string {
 }
 
 // NewPerHostConfigManagerFromMap creates a PerHostConfigManager from a decoded
-// config map, for example the result of decoding yaml or json into
-// map[string]any.
+// config map (e.g., JSON or YAML decoded into map[string]any).
 //
-// Top level keys:
-//   - defaults: starts from DefaultPerHostConfig and applies the keys it sets
-//   - hosts: map of host name to config. Each host starts from the resulting
-//     defaults and applies the keys it sets. A null entry means defaults.
+// Top-level keys:
+//   - defaults: Starts from DefaultPerHostConfig and applies specified keys.
+//   - hosts: Map of host names to config. Each starts from the resulting
+//     defaults. A null entry falls back to defaults.
 //
 // Config keys:
-//   - max_attempts: whole number, at least 1
-//   - attempt_timeout: positive duration string, for example "30s", or
-//     "none" (or "0s", or the number 0) for no attempt timeout
-//   - default_headers: map of header name to a string or list of strings.
-//     A name replaces the inherited header of the same name; an empty list or
-//     null removes it. An empty string is sent as an empty value.
-//   - backoff: map accepted by NewBackoffFromMap
-//   - tls: map accepting insecure_skip_verify (bool). It replaces the
-//     inherited tls config rather than merging with it.
+//   - max_attempts: Whole number (at least 1).
+//   - attempt_timeout: Positive duration string (e.g., "30s"), "none", "0s", or 0 for no timeout.
+//   - default_headers: Map of header names to strings or string lists. Replaces
+//     inherited headers; empty lists or null remove them.
+//   - backoff: Map accepted by NewBackoffFromMap.
+//   - tls: Map accepting insecure_skip_verify (bool). Replaces inherited TLS config.
 //
-// Host names are lower cased, a trailing dot is ignored, and they must not
-// contain a port, because requests are matched on URL.Hostname(). Names that
-// collide after normalization are an error. Unknown keys and values of the
-// wrong type are errors, and errors are reported in sorted key order.
+// Host names are lowercased, trailing dots are ignored, and they must not
+// contain ports (since matching uses URL.Hostname()). Colliding names after
+// normalization return an error. Unknown keys, type mismatches, and collisions
+// return sorted errors.
 //
-// Inheritance is a snapshot taken while parsing: changing Defaults in code
-// afterwards does not affect hosts that were already parsed.
+// Inheritance is a snapshot taken during parsing; subsequent code changes to
+// Defaults do not affect already-parsed hosts.
 func NewPerHostConfigManagerFromMap(data map[string]any) (*PerHostConfigManager, error) {
 	for _, key := range slices.Sorted(maps.Keys(data)) {
 		if key != "defaults" && key != "hosts" {

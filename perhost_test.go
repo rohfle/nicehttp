@@ -2,8 +2,10 @@ package nicehttp
 
 import (
 	"crypto/tls"
+	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -462,5 +464,150 @@ func TestPerHostConfigManagerHostDuplicates(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "duplicate host after normalization") {
 		t.Errorf("expected a duplicate error, got %q", err)
+	}
+}
+
+// TestNicePerHostTransportEvictsLeastRecentlyUsed checks that the cache stops at
+// maxDynamicTransports, and that the drop is the host looked up longest ago.
+func TestNicePerHostTransportEvictsLeastRecentlyUsed(t *testing.T) {
+	manager := &PerHostConfigManager{Defaults: DefaultPerHostConfig.Clone()}
+	runner, err := manager.CreateNicePerHostTransport()
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+
+	first, err := runner.ForHost("h0.example.com")
+	if err != nil {
+		t.Fatalf("while getting transport: %s", err)
+	}
+	var second *NiceTransport
+	// h0 plus this loop is exactly the bound, so nothing is evicted yet.
+	for i := 1; i < maxDynamicTransports; i++ {
+		transport, err := runner.ForHost(fmt.Sprintf("h%d.example.com", i))
+		if err != nil {
+			t.Fatalf("while getting transport for h%d: %s", i, err)
+		}
+		if i == 1 {
+			second = transport
+		}
+	}
+	if got := len(runner.transports); got != maxDynamicTransports {
+		t.Fatalf("cached %d hosts, want %d", got, maxDynamicTransports)
+	}
+
+	// h0 is the most recently used now, so h1 is the entry to drop.
+	if _, err := runner.ForHost("h0.example.com"); err != nil {
+		t.Fatalf("while getting transport: %s", err)
+	}
+	if _, err := runner.ForHost("h-extra.example.com"); err != nil {
+		t.Fatalf("while getting transport: %s", err)
+	}
+
+	if _, ok := runner.transports["h1.example.com"]; ok {
+		t.Error("expected the least recently used host to be evicted")
+	}
+	entry, ok := runner.transports["h0.example.com"]
+	if !ok {
+		t.Fatal("expected the recently used host to stay cached")
+	}
+	if entry.transport != first {
+		t.Error("expected the recently used host to keep its transport")
+	}
+	if _, ok := runner.transports["h-extra.example.com"]; !ok {
+		t.Error("expected the new host to be cached")
+	}
+	if got := len(runner.transports); got != maxDynamicTransports {
+		t.Errorf("cached %d hosts, want %d", got, maxDynamicTransports)
+	}
+
+	// An evicted host gets a new transport on its next request.
+	fresh, err := runner.ForHost("h1.example.com")
+	if err != nil {
+		t.Fatalf("while getting transport: %s", err)
+	}
+	if fresh == second {
+		t.Error("expected a new transport for an evicted host")
+	}
+}
+
+// TestNicePerHostTransportNeverEvictsConfiguredHosts checks that the bound only
+// counts and drops hosts without a config entry.
+func TestNicePerHostTransportNeverEvictsConfiguredHosts(t *testing.T) {
+	manager := &PerHostConfigManager{
+		Defaults: DefaultPerHostConfig.Clone(),
+		Hosts:    map[string]*PerHostConfig{"configured.example.com": {MaxAttempts: 7}},
+	}
+	runner, err := manager.CreateNicePerHostTransport()
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+
+	// The configured host is looked up first, so it is the oldest entry and would
+	// be the first drop if it were counted.
+	configured, err := runner.ForHost("configured.example.com")
+	if err != nil {
+		t.Fatalf("while getting transport: %s", err)
+	}
+	for i := range maxDynamicTransports + 1 {
+		if _, err := runner.ForHost(fmt.Sprintf("h%d.example.com", i)); err != nil {
+			t.Fatalf("while getting transport for h%d: %s", i, err)
+		}
+	}
+
+	entry, ok := runner.transports["configured.example.com"]
+	if !ok {
+		t.Fatal("expected the configured host to stay cached")
+	}
+	if entry.transport != configured {
+		t.Error("expected the configured host to keep its transport")
+	}
+	if entry.dynamic {
+		t.Error("expected the configured host not to be dynamic")
+	}
+
+	dynamic := 0
+	for _, entry := range runner.transports {
+		if entry.dynamic {
+			dynamic++
+		}
+	}
+	if dynamic != maxDynamicTransports {
+		t.Errorf("cached %d dynamic transports, want %d", dynamic, maxDynamicTransports)
+	}
+}
+
+// TestNicePerHostTransportConcurrentEviction checks that the bound holds when
+// several goroutines see new hosts at once.
+func TestNicePerHostTransportConcurrentEviction(t *testing.T) {
+	manager := &PerHostConfigManager{Defaults: DefaultPerHostConfig.Clone()}
+	runner, err := manager.CreateNicePerHostTransport()
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+
+	var wg sync.WaitGroup
+	for worker := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range 100 {
+				host := fmt.Sprintf("w%d-h%d.example.com", worker, i)
+				if _, err := runner.ForHost(host); err != nil {
+					t.Errorf("while getting transport for %s: %s", host, err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	dynamic := 0
+	for _, entry := range runner.transports {
+		if entry.dynamic {
+			dynamic++
+		}
+	}
+	if dynamic > maxDynamicTransports {
+		t.Errorf("cached %d dynamic transports, want at most %d", dynamic, maxDynamicTransports)
 	}
 }
