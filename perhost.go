@@ -116,17 +116,18 @@ func (c *PerHostConfig) CreateNiceTransport() (*NiceTransport, error) {
 	return builder.Build(), nil
 }
 
-// ForHost returns a copy of the config for host, or of the defaults when host is not configured.
-func (m *PerHostConfigManager) ForHost(host string) (*PerHostConfig, error) {
+// ForHost returns a copy of the config for host, or of the defaults when host is not
+// configured. usedDefaults reports which of the two it was.
+func (m *PerHostConfigManager) ForHost(host string) (*PerHostConfig, bool, error) {
 	if m == nil || m.Defaults == nil {
-		return nil, fmt.Errorf("no default per host config")
+		return nil, false, fmt.Errorf("no default per host config")
 	}
 	host = normalizeHost(host)
 	if config, ok := m.Hosts[host]; ok && config != nil {
-		return config.Clone(), nil
+		return config.Clone(), false, nil
 	}
 
-	return m.Defaults.Clone(), nil
+	return m.Defaults.Clone(), true, nil
 }
 
 // ForHost returns the transport for host, creating and caching it on first use.
@@ -136,23 +137,15 @@ func (t *NicePerHostTransport) ForHost(host string) (*NiceTransport, error) {
 	}
 	host = normalizeHost(host)
 
-	t.mu.RLock()
-	entry, ok := t.transports[host]
-	t.mu.RUnlock()
-	if ok {
-		entry.lastSeq.Store(t.seq.Add(1))
-		return entry.transport, nil
-	}
-
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	// Re-check: another goroutine may have created it while we waited
+
 	if entry, ok := t.transports[host]; ok {
 		entry.lastSeq.Store(t.seq.Add(1))
 		return entry.transport, nil
 	}
 
-	config, err := t.config.ForHost(host)
+	config, usedDefaults, err := t.config.ForHost(host)
 	if err != nil {
 		return nil, err
 	}
@@ -160,8 +153,7 @@ func (t *NicePerHostTransport) ForHost(host string) (*NiceTransport, error) {
 	if err != nil {
 		return nil, fmt.Errorf("while creating transport for host %q: %w", host, err)
 	}
-	_, configured := t.config.Hosts[host]
-	entry = &transportEntry{transport: transport, dynamic: !configured}
+	entry := &transportEntry{transport: transport, dynamic: usedDefaults}
 	entry.lastSeq.Store(t.seq.Add(1))
 	t.transports[host] = entry
 	return transport, nil

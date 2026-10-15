@@ -1047,7 +1047,7 @@ func TestZeroValueTransport(t *testing.T) {
 	}
 
 	var manager PerHostConfigManager
-	if _, err := manager.ForHost("example.com"); err == nil {
+	if _, _, err := manager.ForHost("example.com"); err == nil {
 		t.Fatal("expected an error from a per host config manager without defaults")
 	}
 }

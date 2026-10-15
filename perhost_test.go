@@ -41,7 +41,7 @@ func TestPerHostConfigAttemptTimeout(t *testing.T) {
 		"other.example.com":       30 * time.Second, // inherited from defaults
 	}
 	for host, wantTimeout := range want {
-		config, err := manager.ForHost(host)
+		config, _, err := manager.ForHost(host)
 		if err != nil {
 			t.Fatalf("while getting config for %s: %s", host, err)
 		}
@@ -123,9 +123,12 @@ func TestPerHostConfigFromMapInheritance(t *testing.T) {
 		t.Fatalf("while loading config: %s", err)
 	}
 
-	host, err := manager.ForHost("sub.example.com") // key is normalized
+	host, usedDefaults, err := manager.ForHost("sub.example.com") // key is normalized
 	if err != nil {
 		t.Fatalf("while getting config: %s", err)
+	}
+	if usedDefaults {
+		t.Error("expected the config of sub.example.com, not the defaults")
 	}
 	if host.MaxAttempts != 7 || host.AttemptTimeout != 30*time.Second {
 		t.Errorf("expected 7 attempts and a 30s timeout, got %d and %v", host.MaxAttempts, host.AttemptTimeout)
@@ -136,19 +139,24 @@ func TestPerHostConfigFromMapInheritance(t *testing.T) {
 
 	// An empty entry, a nil entry and an unconfigured host all follow the defaults
 	for _, name := range []string{"empty.example.com", "nil.example.com", "other.example.com"} {
-		config, err := manager.ForHost(name)
+		config, usedDefaults, err := manager.ForHost(name)
 		if err != nil {
 			t.Fatalf("while getting config for %s: %s", name, err)
 		}
 		if config.MaxAttempts != 3 || config.AttemptTimeout != 30*time.Second {
 			t.Errorf("%s: expected the defaults, got %d attempts and %v", name, config.MaxAttempts, config.AttemptTimeout)
 		}
+		// An empty or nil entry is still an entry for that host, so only a host
+		// that has none reports that the defaults were used.
+		if want := name == "other.example.com"; usedDefaults != want {
+			t.Errorf("%s: usedDefaults = %v, want %v", name, usedDefaults, want)
+		}
 	}
 
 	// Inheritance is a snapshot: changing the defaults does not reach parsed hosts
 	manager.Defaults.MaxAttempts = 99
 	manager.Defaults.DefaultHeaders.Set("X-Default", "changed")
-	config, err := manager.ForHost("empty.example.com")
+	config, _, err := manager.ForHost("empty.example.com")
 	if err != nil {
 		t.Fatalf("while getting config: %s", err)
 	}
@@ -298,7 +306,7 @@ func TestPerHostConfigHeaderRemoval(t *testing.T) {
 		t.Fatalf("while loading config: %s", err)
 	}
 
-	config, err := manager.ForHost("a.example.com")
+	config, _, err := manager.ForHost("a.example.com")
 	if err != nil {
 		t.Fatalf("while getting config: %s", err)
 	}
@@ -322,7 +330,7 @@ func TestPerHostConfigHeaderRemoval(t *testing.T) {
 	}
 
 	// Another host keeps every inherited header
-	other, err := manager.ForHost("b.example.com")
+	other, _, err := manager.ForHost("b.example.com")
 	if err != nil {
 		t.Fatalf("while getting config: %s", err)
 	}
