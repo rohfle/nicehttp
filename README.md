@@ -117,6 +117,8 @@ if err != nil {
 client := &http.Client{Transport: transport}
 ```
 
+A runnable version is in [`example_test.go`](./example_test.go) (`ExampleNewPerHostConfigManagerFromMap`).
+
 - **Inheritance**: Each host entry inherits from defaults. Unset keys are inherited, and a missing or null host entry falls back entirely to defaults.
 - **Attempt Timeout** (`attempt_timeout`): Accepts a duration string, "`none`", "`0s`", or `0` for no timeout. (In Go, `TimeoutNotSet` inherits from `DefaultAttemptTimeout`, whereas `0` explicitly disables it).
 - **Max Attempts** (`max_attempts`): Accepts an integer, at least 1.
@@ -141,6 +143,16 @@ server, so only a request that is safe to replay is retried:
 
 A `429 Too Many Requests`, honouring `Retry-After`, or a `503 Service Unavailable` is retried for any method,
 since the server answered that it did not process the request.
+
+A request that is not safe to replay can opt in to retrying using context:
+
+```go
+// A POST after a transport error or a 504 is only retried when the context says so
+ctx := nicehttp.SetRetryNonIdempotentInContext(context.Background())
+req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
+```
+
+Runnable in [`example_test.go`](./example_test.go) (`ExampleSetRetryNonIdempotentInContext`).
 
 ## License
 
