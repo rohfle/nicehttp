@@ -124,6 +124,7 @@ client := &http.Client{Transport: transport}
 - **Backoff** (`backoff`): Accepts `min_wait`, `max_wait`, and `coefficients`, and is merged onto the inherited backoff config.
 - **TLS** (`tls`): Supports `insecure_skip_verify` only. Unlike other fields, this replaces the inherited TLS configuration entirely rather than merging.
 - **Host Matching**: Host names are lowercased with any trailing dots ignored, and must not contain a port (requests match against `URL.Hostname()`). Unknown keys or invalid value types will result in an error.
+- **Transport Cache**: Transports are created lazily on first use and cached. Defined hosts remain cached permanently, while dynamic hosts (those absent from config that fallback to defaults) are capped at 256 using LRU eviction. Evicted hosts reset with a fresh limiter and backoff.
 
 
 ## Retries
