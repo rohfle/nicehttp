@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -48,12 +49,25 @@ type PerHostConfigManager struct {
 	Hosts    map[string]*PerHostConfig
 }
 
+// transportEntry is a cached transport for one host. dynamic reports whether the
+// host has no entry in the config, so it was created for a host that appeared
+// dynamically. lastSeq is the seq value of the last lookup of the entry, so the
+// smallest lastSeq is the least recently used entry.
+type transportEntry struct {
+	transport *NiceTransport
+	dynamic   bool
+	lastSeq   atomic.Uint64
+}
+
 // NicePerHostTransport is an http.RoundTripper that uses one transport per host, created on
 // the first request to that host.
 type NicePerHostTransport struct {
 	mu         sync.RWMutex
-	transports map[string]*NiceTransport
-	config     *PerHostConfigManager
+	transports map[string]*transportEntry
+	// seq stamps lastSeq: every lookup that hits a cached entry takes the next
+	// value, so the smallest lastSeq is the least recently used entry.
+	seq    atomic.Uint64
+	config *PerHostConfigManager
 }
 
 // Clone returns a deep copy of the config.
@@ -123,28 +137,33 @@ func (t *NicePerHostTransport) ForHost(host string) (*NiceTransport, error) {
 	host = normalizeHost(host)
 
 	t.mu.RLock()
-	transport, ok := t.transports[host]
+	entry, ok := t.transports[host]
 	t.mu.RUnlock()
 	if ok {
-		return transport, nil
+		entry.lastSeq.Store(t.seq.Add(1))
+		return entry.transport, nil
 	}
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	// Re-check: another goroutine may have created it while we waited
-	if transport, ok := t.transports[host]; ok {
-		return transport, nil
+	if entry, ok := t.transports[host]; ok {
+		entry.lastSeq.Store(t.seq.Add(1))
+		return entry.transport, nil
 	}
 
 	config, err := t.config.ForHost(host)
 	if err != nil {
 		return nil, err
 	}
-	transport, err = config.CreateNiceTransport()
+	transport, err := config.CreateNiceTransport()
 	if err != nil {
 		return nil, fmt.Errorf("while creating transport for host %q: %w", host, err)
 	}
-	t.transports[host] = transport
+	_, configured := t.config.Hosts[host]
+	entry = &transportEntry{transport: transport, dynamic: !configured}
+	entry.lastSeq.Store(t.seq.Add(1))
+	t.transports[host] = entry
 	return transport, nil
 }
 
@@ -153,11 +172,11 @@ func (t *NicePerHostTransport) ForHost(host string) (*NiceTransport, error) {
 // http.Client.CloseIdleConnections.
 func (t *NicePerHostTransport) CloseIdleConnections() {
 	t.mu.RLock()
-	transports := slices.Collect(maps.Values(t.transports))
+	entries := slices.Collect(maps.Values(t.transports))
 	t.mu.RUnlock()
 
-	for _, transport := range transports {
-		transport.CloseIdleConnections()
+	for _, entry := range entries {
+		entry.transport.CloseIdleConnections()
 	}
 }
 
@@ -217,7 +236,7 @@ func (m *PerHostConfigManager) CreateNicePerHostTransport() (*NicePerHostTranspo
 
 	return &NicePerHostTransport{
 		config:     &cloned,
-		transports: make(map[string]*NiceTransport),
+		transports: make(map[string]*transportEntry),
 	}, nil
 }
 
