@@ -55,8 +55,7 @@ func (b *NiceTransportBuilder) SetDefaultHeaders(headers http.Header) *NiceTrans
 }
 
 // SetLimiterBackoff sets the backoff for the limiter.
-
-// If this is not set, or set to nil, the DefaultBackoff will be used
+// If this is not set, or set to nil, the DefaultBackoff will be used.
 func (b *NiceTransportBuilder) SetLimiterBackoff(backoff *Backoff) *NiceTransportBuilder {
 	if backoff == nil {
 		// A nil backoff means the default backoff is used
@@ -72,7 +71,6 @@ func (b *NiceTransportBuilder) SetLimiterBackoff(backoff *Backoff) *NiceTranspor
 // SetAttemptTimeout sets timeout for a single connection attempt,
 // after which the request will be retried. This is part of the total
 // request time, which is controlled by the http.Client timeout.
-
 // A value of NoTimeout means no timeout, and TimeoutNotSet (or any negative
 // value) means the attempt timeout is not set, so DefaultAttemptTimeout is
 // used.

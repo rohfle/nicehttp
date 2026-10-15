@@ -154,16 +154,14 @@ type NiceTransport struct {
 }
 
 // Clone returns a copy of the transport, with cloned headers, limiter and backoff.
-func (s *NiceTransport) Clone() *NiceTransport {
-	var snew NiceTransport
-	snew.defaultHeaders = s.defaultHeaders.Clone()
-	snew.maxAttempts = s.maxAttempts
-	snew.attemptTimeout = s.attemptTimeout
-	snew.downstreamTransport = s.downstreamTransport
-	if s.limiter != nil {
-		snew.limiter = s.limiter.Clone()
+func (rt *NiceTransport) Clone() *NiceTransport {
+	cloned := *rt
+	cloned.defaultHeaders = rt.defaultHeaders.Clone()
+	// The limiter carries state of its own, so it is cloned rather than shared
+	if rt.limiter != nil {
+		cloned.limiter = rt.limiter.Clone()
 	}
-	return &snew
+	return &cloned
 }
 
 // cloneDefaultTransport returns a clone of http.DefaultTransport, so each
@@ -262,7 +260,7 @@ func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error
 	}
 
 	// in order to retry requests, we need io.Seeker to support rewinding the body
-	var bodySeeker io.ReadSeekCloser = nil
+	var bodySeeker io.ReadSeekCloser
 	// the body might be nil for some methods (eg GET / HEAD)
 	if origReq.Body != nil {
 		var hasSeek bool
@@ -303,9 +301,9 @@ func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error
 	attempt := 0
 	for {
 		// This loop will run up to maxAttempts times
-		attempt += 1
+		attempt++
 
-		resp, err, final := rt.roundTripAttempt(origCtx, origReq, attemptTimeout, attempt >= maxAttempts)
+		resp, final, err := rt.roundTripAttempt(origCtx, origReq, attemptTimeout, attempt >= maxAttempts)
 		if final {
 			return resp, err
 		}
@@ -328,11 +326,11 @@ func newAttemptContext(parent context.Context, timeout time.Duration) (context.C
 
 // roundTripAttempt executes a single request attempt under the rate limiter,
 // returning whether the response is final or eligible for a retry.
-func (rt *NiceTransport) roundTripAttempt(origCtx context.Context, origReq *http.Request, attemptTimeout time.Duration, lastAttempt bool) (resp *http.Response, err error, final bool) {
+func (rt *NiceTransport) roundTripAttempt(origCtx context.Context, origReq *http.Request, attemptTimeout time.Duration, lastAttempt bool) (resp *http.Response, final bool, err error) {
 	// Wait patiently for the limiter before sending the request up to the context deadline
 	if err := rt.limiter.Wait(origCtx); err != nil {
 		// The original context is cancelled or has exceeded deadline
-		return nil, err, true
+		return nil, true, err
 	}
 
 	needsRetry := true
@@ -380,7 +378,7 @@ func (rt *NiceTransport) roundTripAttempt(origCtx context.Context, origReq *http
 			resp.Body = &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancelAttemptCtx}
 			cancelAttemptCtx = nil
 		}
-		return resp, err, true
+		return resp, true, err
 	}
 
 	// Drain and close the discarded body to allow connection reuse for retries
@@ -389,7 +387,7 @@ func (rt *NiceTransport) roundTripAttempt(origCtx context.Context, origReq *http
 		resp.Body.Close()
 	}
 
-	return resp, err, false
+	return resp, false, err
 }
 
 func parseRetryAfterHeader(resp *http.Response) time.Duration {

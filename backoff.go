@@ -28,6 +28,7 @@ type BackoffCoefficients struct {
 	Jitter  float64 `json:"jitter"`
 }
 
+// DefaultBackoffCoefficients are the backoff coefficients that will be used by default
 var DefaultBackoffCoefficients = BackoffCoefficients{
 	Success: 0.5,
 	Fail:    1.5,
@@ -198,8 +199,8 @@ func (adj *Backoff) Next() time.Time {
 
 // Clone returns a copy of the backoff, reset to its minimum wait.
 func (adj *Backoff) Clone() *Backoff {
-	copy := *adj
-	copy.last = time.Now().Add(-copy.MinWait)
-	copy.wait = copy.MinWait
-	return &copy
+	cloned := *adj
+	cloned.last = time.Now().Add(-cloned.MinWait)
+	cloned.wait = cloned.MinWait
+	return &cloned
 }

@@ -33,7 +33,7 @@ func (mt *MockTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if mt.Endpoint.CallCount == 0 {
 		mt.Endpoint.Start = time.Now().UTC()
 	}
-	mt.Endpoint.CallCount += 1
+	mt.Endpoint.CallCount++
 	mt.Endpoint.Timings = append(mt.Endpoint.Timings, time.Now().UTC().Sub(mt.Endpoint.Start))
 	callCount := mt.Endpoint.CallCount
 	mt.mutex.Unlock()
@@ -397,7 +397,7 @@ func TestRoundTripperMultithread(t *testing.T) {
 		Start:     time.Time{},
 		Timings:   nil,
 		Deadline:  time.Time{},
-		Handler: func(endpoint *MockEndpoint, callCount int, req *http.Request) (*http.Response, error) {
+		Handler: func(_ *MockEndpoint, callCount int, _ *http.Request) (*http.Response, error) {
 			switch callCount % 2 {
 			case 1:
 				return &http.Response{
@@ -450,7 +450,7 @@ func TestRoundTripperDefaults(t *testing.T) {
 		Start:     time.Time{},
 		Timings:   nil,
 		Deadline:  time.Time{},
-		Handler: func(endpoint *MockEndpoint, callCount int, req *http.Request) (*http.Response, error) {
+		Handler: func(_ *MockEndpoint, callCount int, req *http.Request) (*http.Response, error) {
 			checkGeneralRequestStuff(t, req, callCount, "GET", "")
 			return &http.Response{
 				StatusCode: 200,
@@ -547,7 +547,7 @@ func TestRoundTripperAttemptTimeoutOverride(t *testing.T) {
 		Start:     time.Time{},
 		Timings:   nil,
 		Deadline:  time.Time{},
-		Handler: func(endpoint *MockEndpoint, callCount int, req *http.Request) (*http.Response, error) {
+		Handler: func(_ *MockEndpoint, _ int, req *http.Request) (*http.Response, error) {
 			if deadline, hasDeadline := req.Context().Deadline(); hasDeadline {
 				deadlines <- time.Until(deadline)
 			} else {
@@ -614,7 +614,7 @@ func TestRoundTripperAttemptTimeoutOverride(t *testing.T) {
 func TestRoundTripperAttemptTimeoutBodyRead(t *testing.T) {
 	// The body arrives only after the response headers, like any streamed or
 	// large response. Reading it must not be aborted by the attempt timeout.
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Length", "5")
 		w.WriteHeader(200)
 		w.(http.Flusher).Flush()
@@ -656,9 +656,9 @@ func TestRoundTripperRetryWithConnectionLimit(t *testing.T) {
 	var mutex sync.Mutex
 	callCount := 0
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		mutex.Lock()
-		callCount += 1
+		callCount++
 		currentCall := callCount
 		mutex.Unlock()
 
@@ -716,7 +716,7 @@ func TestRoundTripperCloneKeepsAttemptTimeout(t *testing.T) {
 		Start:     time.Time{},
 		Timings:   nil,
 		Deadline:  time.Time{},
-		Handler: func(endpoint *MockEndpoint, callCount int, req *http.Request) (*http.Response, error) {
+		Handler: func(_ *MockEndpoint, _ int, req *http.Request) (*http.Response, error) {
 			if deadline, hasDeadline := req.Context().Deadline(); hasDeadline {
 				deadlines <- time.Until(deadline)
 			} else {
@@ -762,7 +762,7 @@ func TestRoundTripperLimiterReleasedAfterPanic(t *testing.T) {
 		Start:     time.Time{},
 		Timings:   nil,
 		Deadline:  time.Time{},
-		Handler: func(endpoint *MockEndpoint, callCount int, req *http.Request) (*http.Response, error) {
+		Handler: func(_ *MockEndpoint, callCount int, _ *http.Request) (*http.Response, error) {
 			if callCount == 1 {
 				panic("simulated panic in downstream roundtripper")
 			}
@@ -830,7 +830,7 @@ func TestRoundTripperDefaultHeadersKeepRequestClean(t *testing.T) {
 		Start:     time.Time{},
 		Timings:   nil,
 		Deadline:  time.Time{},
-		Handler: func(endpoint *MockEndpoint, callCount int, req *http.Request) (*http.Response, error) {
+		Handler: func(_ *MockEndpoint, _ int, req *http.Request) (*http.Response, error) {
 			sentHeader = req.Header
 			return &http.Response{
 				StatusCode: 200,
@@ -883,10 +883,10 @@ func TestRoundTripperCloseIdleConnections(t *testing.T) {
 	// otherwise its idle connections are never closed
 	closed := make(chan struct{}, 4)
 
-	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		io.WriteString(w, "OK") //nolint:errcheck
 	}))
-	server.Config.ConnState = func(c net.Conn, state http.ConnState) {
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
 		switch state {
 		case http.StateClosed, http.StateHijacked:
 			closed <- struct{}{}
@@ -935,7 +935,7 @@ func TestZeroValueBuilder(t *testing.T) {
 		Start:     time.Time{},
 		Timings:   nil,
 		Deadline:  time.Time{},
-		Handler: func(endpoint *MockEndpoint, callCount int, req *http.Request) (*http.Response, error) {
+		Handler: func(_ *MockEndpoint, _ int, req *http.Request) (*http.Response, error) {
 			sentHeader = req.Header
 			return &http.Response{
 				StatusCode: 200,
@@ -1023,7 +1023,7 @@ func TestZeroValueTransport(t *testing.T) {
 	}
 
 	// Not specifying a downstream transport means http.DefaultTransport is used
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		io.WriteString(w, "OK") //nolint:errcheck
 	}))
 	defer server.Close()

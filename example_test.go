@@ -15,7 +15,7 @@ import (
 
 func ExampleNewNiceTransportBuilder() {
 	// Mock HTTP server
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, "hello world")
 	}))
 	defer server.Close()
@@ -75,7 +75,7 @@ func ExampleNewNiceTransportBuilder() {
 }
 
 func ExampleNewPerHostConfigManagerFromMap() {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, "hello world")
 	}))
 	defer server.Close()
@@ -131,7 +131,7 @@ func ExampleNewPerHostConfigManagerFromMap() {
 
 func ExampleSetRetryNonIdempotentInContext() {
 	var servedFirst atomic.Bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if servedFirst.CompareAndSwap(false, true) {
 			// The server did not process the request, so a retry is safe
 			w.WriteHeader(http.StatusGatewayTimeout)
