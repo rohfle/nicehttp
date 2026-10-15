@@ -2,6 +2,8 @@
 
 A nice HTTP client written in golang with rate limiting, backoff and max retries. Respects the 429 Retry-After header.
 
+Requires Go 1.26 or newer.
+
 [![Go Report Card](https://goreportcard.com/badge/github.com/rohfle/nicehttp)](https://goreportcard.com/report/github.com/rohfle/nicehttp)
 [![Test](https://github.com/rohfle/nicehttp/actions/workflows/test.yml/badge.svg)](https://github.com/rohfle/nicehttp/actions/workflows/test.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/rohfle/nicehttp.svg)](https://pkg.go.dev/github.com/rohfle/nicehttp)
@@ -158,7 +160,7 @@ Runnable in [`example_test.go`](./example_test.go) (`ExampleSetRetryNonIdempoten
 
 MIT License
 
-Copyright (c) 2025 Rohan Fletcher
+Copyright (c) 2026 Rohan Fletcher
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
