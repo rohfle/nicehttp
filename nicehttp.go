@@ -149,7 +149,7 @@ type NiceTransport struct {
 	// Not setting a value will use a clone of http.DefaultTransport, or the
 	// global itself when it has been replaced with a custom RoundTripper
 	downstreamTransport http.RoundTripper
-	// RateLimter ensures a minimum rate limit between the start of requests
+	// limiter ensures a minimum interval between requests
 	limiter *Limiter
 }
 
@@ -162,17 +162,6 @@ func (rt *NiceTransport) Clone() *NiceTransport {
 		cloned.limiter = rt.limiter.Clone()
 	}
 	return &cloned
-}
-
-// cloneDefaultTransport returns a clone of http.DefaultTransport, so each
-// transport gets its own connection pool. A program that replaced the global
-// with a custom RoundTripper is used as is, since only an http.Transport can be
-// cloned.
-func cloneDefaultTransport() http.RoundTripper {
-	if base, ok := http.DefaultTransport.(*http.Transport); ok {
-		return base.Clone()
-	}
-	return http.DefaultTransport
 }
 
 // downstream returns the transport that requests are sent to. Not specifying a

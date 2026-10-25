@@ -28,7 +28,11 @@ func (b *NiceTransportBuilder) Set(settings *NiceTransport) *NiceTransportBuilde
 	b.SetMaxAttempts(settings.maxAttempts)
 	b.SetDownstreamTransport(settings.downstreamTransport)
 	b.SetAttemptTimeout(settings.attemptTimeout)
-	b.SetLimiterBackoff(settings.limiter.backoff)
+	var backoff *Backoff
+	if settings.limiter != nil {
+		backoff = settings.limiter.backoff
+	}
+	b.SetLimiterBackoff(backoff)
 	return b
 }
 

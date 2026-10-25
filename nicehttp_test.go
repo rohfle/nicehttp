@@ -1052,9 +1052,9 @@ func TestZeroValueTransport(t *testing.T) {
 	}
 }
 
-// TestBuildDefaultTransport checks how the downstream is resolved when the builder
-// has none: a clone of http.DefaultTransport so each transport owns its pool, and a
-// replaced global used as is rather than a panic.
+// TestBuildDefaultTransport checks how the downstream is resolved when the
+// builder has none: the shared http.DefaultTransport, including a replaced
+// global.
 func TestBuildDefaultTransport(t *testing.T) {
 	restore := http.DefaultTransport
 	defer func() { http.DefaultTransport = restore }()
@@ -1086,22 +1086,11 @@ func TestBuildDefaultTransport(t *testing.T) {
 
 	http.DefaultTransport = restore
 
-	// Without a replacement, every build clones the default for its own pool
+	// Without a replacement, builds share the global transport and its pool
 	first := NewNiceTransportBuilder().Build()
 	second := NewNiceTransportBuilder().Build()
-	firstTransport, ok := first.downstreamTransport.(*http.Transport)
-	if !ok {
-		t.Fatalf("expected an *http.Transport, got %T", first.downstreamTransport)
-	}
-	secondTransport, ok := second.downstreamTransport.(*http.Transport)
-	if !ok {
-		t.Fatalf("expected an *http.Transport, got %T", second.downstreamTransport)
-	}
-	if firstTransport == secondTransport {
-		t.Error("expected each transport to have its own clone of the default transport")
-	}
-	if firstTransport == restore {
-		t.Error("expected a clone, not the global itself")
+	if first.downstreamTransport != restore || second.downstreamTransport != restore {
+		t.Error("expected both transports to share http.DefaultTransport")
 	}
 }
 
