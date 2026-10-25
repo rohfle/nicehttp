@@ -11,7 +11,7 @@ type NiceTransportBuilder struct {
 	attemptTimeout      time.Duration // TimeoutNotSet until SetAttemptTimeout is called
 	maxAttempts         int
 	downstreamTransport http.RoundTripper
-	limiter             *Limiter
+	backoff             *Backoff
 }
 
 // NewNiceTransportBuilder creates a NewNiceTransportBuilder
@@ -28,10 +28,7 @@ func (b *NiceTransportBuilder) Set(settings *NiceTransport) *NiceTransportBuilde
 	b.SetMaxAttempts(settings.maxAttempts)
 	b.SetDownstreamTransport(settings.downstreamTransport)
 	b.SetAttemptTimeout(settings.attemptTimeout)
-	b.limiter = nil
-	if settings.limiter != nil {
-		b.limiter = settings.limiter.Clone()
-	}
+	b.SetLimiterBackoff(settings.limiter.backoff)
 	return b
 }
 
@@ -57,14 +54,7 @@ func (b *NiceTransportBuilder) SetDefaultHeaders(headers http.Header) *NiceTrans
 // SetLimiterBackoff sets the backoff for the limiter.
 // If this is not set, or set to nil, the DefaultBackoff will be used.
 func (b *NiceTransportBuilder) SetLimiterBackoff(backoff *Backoff) *NiceTransportBuilder {
-	if backoff == nil {
-		// A nil backoff means the default backoff is used
-		b.limiter = nil
-		return b
-	}
-	b.limiter = &Limiter{
-		backoff: backoff.Clone(),
-	}
+	b.backoff = backoff
 	return b
 }
 
@@ -115,19 +105,18 @@ func (b *NiceTransportBuilder) Build() *NiceTransport {
 		b.attemptTimeout = DefaultAttemptTimeout
 	}
 	if b.downstreamTransport == nil {
-		b.downstreamTransport = cloneDefaultTransport()
+		// share the default transport by default
+		b.downstreamTransport = http.DefaultTransport
 	}
-	if b.limiter == nil {
-		b.limiter = &Limiter{
-			backoff: DefaultBackoff.Clone(),
-		}
+	if b.backoff == nil {
+		b.backoff = DefaultBackoff
 	}
 
 	return &NiceTransport{
 		defaultHeaders:      b.defaultHeaders,
 		maxAttempts:         b.maxAttempts,
 		attemptTimeout:      b.attemptTimeout,
-		limiter:             b.limiter,
+		limiter:             &Limiter{backoff: b.backoff.Clone()},
 		downstreamTransport: b.downstreamTransport,
 	}
 }
