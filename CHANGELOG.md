@@ -2,7 +2,7 @@
 
 Notable changes per tagged release, newest first. 
 
-## [Unreleased]
+## [v0.4.0] - 2026-10-25
 
 ### Changed
 
@@ -39,4 +39,5 @@ Notable changes per tagged release, newest first.
 - Fixed host normalization issues with ports, stray spaces, and IPv6 brackets.
 - Resolved various concurrency edge cases, header mutation bugs, and zero-value handling.
 
+[v0.4.0]: https://github.com/rohfle/nicehttp/releases/tag/v0.4.0
 [v0.3.0]: https://github.com/rohfle/nicehttp/releases/tag/v0.3.0
