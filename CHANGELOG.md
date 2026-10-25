@@ -2,6 +2,20 @@
 
 Notable changes per tagged release, newest first. 
 
+## [Unreleased]
+
+### Changed
+
+- **Per-Host API**: `PerHostConfig` (defaults, hosts and the shared downstream) plus `HostConfig` (one host) replace `PerHostConfigManager`. Parse with `PerHostConfigFromMap` and build with `NewNicePerHostTransport(config)`. Hand built configs are validated like parsed ones.
+- **Shared Downstream**: Every per-host transport uses `PerHostConfig.Downstream`, so one connection pool serves all hosts. `nil` uses `http.DefaultTransport`; `CloseIdleConnections` delegates to it.
+- **Transport Defaults**: A builder without a downstream now shares `http.DefaultTransport` instead of cloning it, so connections pool across clients.
+- **Validation**: `max_attempts` is limited to 1 to 100; host names reject ports, schemes, paths, spaces, empty labels and malformed brackets; header names and values are checked at parse time; `json.Number` is accepted.
+- **TLS**: Removed the `tls` config key and `PerHostConfig.TLS`; configure TLS on the shared downstream instead.
+
+### Removed
+
+- `PerHostConfigManager`, `DefaultPerHostConfig`, `NewPerHostConfigManagerFromMap`, `CreateNicePerHostTransportFromMap`, `PerHostConfig.CreateNiceTransport`, and `PerHostConfigManager.ForHost`.
+
 ## [v0.3.0] - 2026-10-16
 
 ### Added

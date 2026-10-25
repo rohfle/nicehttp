@@ -83,8 +83,9 @@ A runnable version of this example is in [`example_test.go`](./example_test.go).
 
 ## Per host configuration
 
-`NewPerHostConfigManagerFromMap` takes a `map[string]any` based config
-and returns a factory that builds one `NiceTransport` per host on first use:
+`PerHostConfigFromMap` parses a `map[string]any` document (decoded with
+`encoding/json`, including `json.Number`, or `yaml.v3`), and
+`NewNicePerHostTransport` builds `NiceTransport` per host on first use:
 
 ```json
 {
@@ -100,34 +101,47 @@ and returns a factory that builds one `NiceTransport` per host on first use:
   },
   "hosts": {
     "api.example.com": { "max_attempts": 5 },
-    "api.internal.example.com": { "tls": { "insecure_skip_verify": true } },
     "slow.example.com": { "attempt_timeout": "none" }
   }
 }
 ```
 
 ```go
-// data is the document above decoded, for example with encoding/json
-manager, err := nicehttp.NewPerHostConfigManagerFromMap(data)
+// data is the document above decoded, for example with encoding/json.
+config, err := nicehttp.PerHostConfigFromMap(data)
 if err != nil {
 	return err
 }
-transport, err := manager.CreateNicePerHostTransport()
+// Shared by every host; nil means http.DefaultTransport.
+config.Downstream = downstream
+transport, err := nicehttp.NewNicePerHostTransport(config)
 if err != nil {
 	return err
 }
 client := &http.Client{Transport: transport}
 ```
 
-A runnable version is in [`example_test.go`](./example_test.go) (`ExampleNewPerHostConfigManagerFromMap`).
+The same config can be built in Go, where unset fields inherit from `Defaults`:
+
+```go
+config := nicehttp.PerHostConfig{
+	Defaults: &nicehttp.HostConfig{MaxAttempts: 3},
+	Hosts: map[string]*nicehttp.HostConfig{
+		"api.example.com": {MaxAttempts: 5},
+	},
+}
+transport, err := nicehttp.NewNicePerHostTransport(config)
+```
+
+A runnable version is in [`example_test.go`](./example_test.go) (`ExampleNewNicePerHostTransport`).
 
 - **Inheritance**: Each host entry inherits from defaults. Unset keys are inherited, and a missing or null host entry falls back entirely to defaults.
-- **Attempt Timeout** (`attempt_timeout`): Accepts a duration string, "`none`", "`0s`", or `0` for no timeout. (In Go, `TimeoutNotSet` inherits from `DefaultAttemptTimeout`, whereas `0` explicitly disables it).
-- **Max Attempts** (`max_attempts`): Accepts an integer, at least 1.
-- **Default Headers** (`default_headers`): Replaces the inherited value per header name; it does not append. An empty list or `null` removes a header, and an empty string is sent as an empty value.
+- **Attempt Timeout** (`attempt_timeout`): Accepts a duration string, "`none`", "`0s`", or `0` for no timeout. In Go, a nil `HostConfig.AttemptTimeout` inherits `DefaultAttemptTimeout`, while a pointer to `NoTimeout` disables it.
+- **Max Attempts** (`max_attempts`): Accepts a whole number from 1 to 100.
+- **Default Headers** (`default_headers`): Replaces the inherited value per header name; it does not append. An empty list or `null` removes a header, and an empty string is sent as an empty value. Names and values must be valid HTTP header tokens.
 - **Backoff** (`backoff`): Accepts `min_wait`, `max_wait`, and `coefficients`, and is merged onto the inherited backoff config.
-- **TLS** (`tls`): Supports `insecure_skip_verify` only. Unlike other fields, this replaces the inherited TLS configuration entirely rather than merging.
-- **Host Matching**: Host names are lowercased with any trailing dots ignored, and must not contain a port (requests match against `URL.Hostname()`). Unknown keys or invalid value types will result in an error.
+- **Host Matching**: Host names may be IP literals or DNS-style names (letters, digits, `-`, `_`, IDN characters). Case, surrounding spaces, one trailing dot and IPv6 brackets are normalized; ports, schemes, paths, empty labels, spaces and multiple trailing dots are rejected.
+- **Shared Downstream**: Every host transport sends requests through `PerHostConfig.Downstream`, so one connection pool serves all hosts. TLS, proxies and other transport tuning belong there, not in the per-host config.
 - **Transport Cache**: Transports are created lazily on first use and cached. Defined hosts remain cached permanently, while dynamic hosts (those absent from config that fallback to defaults) are capped at 256 using LRU eviction. Evicted hosts reset with a fresh limiter and backoff.
 
 

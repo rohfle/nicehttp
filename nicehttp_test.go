@@ -1045,10 +1045,8 @@ func TestZeroValueTransport(t *testing.T) {
 	if _, err := (&NicePerHostTransport{}).RoundTrip(req); err == nil {
 		t.Fatal("expected an error from a per host transport without config")
 	}
-
-	var manager PerHostConfigManager
-	if _, _, err := manager.ForHost("example.com"); err == nil {
-		t.Fatal("expected an error from a per host config manager without defaults")
+	if _, err := (&NicePerHostTransport{}).ForHost("example.com"); err == nil {
+		t.Fatal("expected an error from a per host transport without config")
 	}
 }
 

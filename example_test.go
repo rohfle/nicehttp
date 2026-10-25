@@ -74,14 +74,14 @@ func ExampleNewNiceTransportBuilder() {
 	// Output: got resp: hello world
 }
 
-func ExampleNewPerHostConfigManagerFromMap() {
+func ExampleNewNicePerHostTransport() {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, "hello world")
 	}))
 	defer server.Close()
 
-	// The defaults apply to every host, a host entry overrides single keys
-	manager, err := nicehttp.NewPerHostConfigManagerFromMap(map[string]any{
+	// The defaults apply to every host, a host entry overrides single keys.
+	config, err := nicehttp.PerHostConfigFromMap(map[string]any{
 		"defaults": map[string]any{
 			"max_attempts":    3,
 			"attempt_timeout": "30s",
@@ -97,9 +97,9 @@ func ExampleNewPerHostConfigManagerFromMap() {
 		fmt.Println("error:", err)
 		return
 	}
-
-	// One transport per host is created on the first request to it
-	transport, err := manager.CreateNicePerHostTransport()
+	// The downstream roundtripper is shared by every host; nil means
+	// http.DefaultTransport. Assign a custom one to config.Downstream.
+	transport, err := nicehttp.NewNicePerHostTransport(config)
 	if err != nil {
 		fmt.Println("error:", err)
 		return
@@ -109,7 +109,6 @@ func ExampleNewPerHostConfigManagerFromMap() {
 		Transport: transport,
 		Timeout:   10 * time.Minute,
 	}
-	defer client.CloseIdleConnections()
 
 	// The host in the URL picks the config. The test server listens on 127.0.0.1,
 	// which has no entry, so this request uses the defaults.
