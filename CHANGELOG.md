@@ -2,6 +2,12 @@
 
 Notable changes per tagged release, newest first. 
 
+## [v0.4.1] - 2026-10-25
+
+### Changed
+
+- **Dependencies**: Updated `github.com/neilotoole/fifomu` to v0.2.0, which brings `golang.org/x/sync` v0.20.0. The `fifomu.Mutex` API used by `Limiter` is unchanged.
+
 ## [v0.4.0] - 2026-10-25
 
 ### Changed
