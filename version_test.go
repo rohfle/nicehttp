@@ -31,7 +31,7 @@ func TestVersionFrom(t *testing.T) {
 			name: "dependency with a release version",
 			info: &debug.BuildInfo{
 				Main: debug.Module{Path: "example.com/app", Version: "(devel)"},
-				Deps: []*debug.Module{module("github.com/neilotoole/fifomu", "v0.1.2"), module(nicehttpModulePath, "v0.4.5")},
+				Deps: []*debug.Module{module("github.com/neilotoole/fifomu", "v0.2.0"), module(nicehttpModulePath, "v0.4.5")},
 			},
 			want: "v0.4.5",
 		},
@@ -71,7 +71,7 @@ func TestVersionFrom(t *testing.T) {
 			name: "nicehttp not in the build",
 			info: &debug.BuildInfo{
 				Main: debug.Module{Path: "example.com/app", Version: "v3.0.0"},
-				Deps: []*debug.Module{module("github.com/neilotoole/fifomu", "v0.1.2")},
+				Deps: []*debug.Module{module("github.com/neilotoole/fifomu", "v0.2.0")},
 			},
 			want: versionUnknown,
 		},
