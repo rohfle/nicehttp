@@ -185,8 +185,8 @@ func (rt *NiceTransport) CloseIdleConnections() {
 // attempt failed or returned a retryable response.
 //
 // origReq is the request given by the caller, not the per attempt clone: the
-// attempt timeout cancels the clone's context, and that timeout is exactly one
-// of the cases that should be retried.
+// attempt timeout cancels the clone's context, so only origReq can tell whether
+// the caller itself gave up.
 func shouldRetryRequest(origReq *http.Request, resp *http.Response, err error) bool {
 	// The caller gave up, so a retry cannot succeed
 	if origReq.Context().Err() != nil {
@@ -231,41 +231,67 @@ func replayable(req *http.Request) bool {
 
 // RoundTrip is a custom implementation that handles backoff, error retries and done context.
 //
-// A failed attempt is retried up to maxAttempts. An attempt timeout is always
-// retried, while a cancelled or expired caller context never is. After a
-// transport error or a 504 Gateway Timeout, which do not say whether the
-// request reached the server, only a request that is safe to replay is retried:
+// A failed attempt is retried up to maxAttempts, while a cancelled or expired
+// caller context is never retried. After an attempt timeout, a transport error
+// or a 504 Gateway Timeout, which do not say whether the request reached the
+// server, only a request that is safe to replay is retried:
 // an idempotent method, a request carrying an Idempotency-Key, or a request
 // whose context comes from SetRetryNonIdempotentInContext. A 429 or 503 is
 // retried for any method, since the server answered that it did not process the
 // request.
 //
 // A response that arrives after the caller's context is done is returned as is,
-// rather than retried, and the cancellation surfaces when its body is read.
+// rather than retried, and the cancellation surfaces when its body is read. A
+// retry whose backoff wait cannot start before the caller's deadline is not
+// attempted; the last response is returned instead.
 func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error) {
 	if rt.limiter == nil {
 		// A transport without a limiter cannot back off between attempts
 		return nil, fmt.Errorf("nicehttp: transport has no limiter, create it with NewNiceTransportBuilder")
 	}
 
+	origCtx := origReq.Context()
+
+	// maxAttempts and attemptTimeout can be overridden per request through
+	// context. Context values are clamped to the same range as the per host
+	// config, so a bad value cannot turn into an unbounded retry loop.
+	maxAttempts := rt.maxAttempts
+	if val, ok := GetMaxAttemptsFromContext(origCtx); ok {
+		maxAttempts = val
+	}
+	maxAttempts = min(max(maxAttempts, 1), maxAttemptsLimit)
+	attemptTimeout := rt.attemptTimeout
+	if val, ok := GetAttemptTimeoutFromContext(origCtx); ok {
+		attemptTimeout = val
+	}
+
 	// in order to retry requests, we need io.Seeker to support rewinding the body
 	var bodySeeker io.ReadSeekCloser
 	// the body might be nil for some methods (eg GET / HEAD)
 	if origReq.Body != nil {
-		var hasSeek bool
-		bodySeeker, hasSeek = origReq.Body.(io.ReadSeekCloser)
-		if hasSeek {
+		if seeker, ok := origReq.Body.(io.ReadSeekCloser); ok {
 			// The body is seekable so we can stream the original
 			// Defer the close of the original request body
 			defer origReq.Body.Close()
 			// Prevent downstream roundtripper from closing the body
-			origReq.Body = io.NopCloser(bodySeeker)
+			origReq.Body = io.NopCloser(seeker)
+			bodySeeker = seeker
+		} else if maxAttempts == 1 {
+			// No retry can occur, so send the body as is instead of reading it
+			// into memory for nothing. The downstream roundtripper owns and
+			// closes it, as it does for any other request.
+			log.Printf("nicehttp: request body is not buffered because maxAttempts is 1, so the request cannot be retried")
 		} else {
-			// The body is not seekable so we have to read it fully into memory
-			data, err := io.ReadAll(origReq.Body)
+			// The body is not seekable, so read it fully into memory to be
+			// able to replay it. The read is bounded by the caller context:
+			// closing the body is what unblocks a read that never returns.
+			data, err := readRequestBody(origCtx, origReq.Body)
 			// Close body immediately after read, regardless if there was an error or not
 			origReq.Body.Close()
 			if err != nil {
+				if ctxErr := origCtx.Err(); ctxErr != nil {
+					return nil, ctxErr
+				}
 				return nil, fmt.Errorf("while reading request body: %w", err)
 			}
 			// With the read data, create a new bytes.Reader with noop Close()
@@ -273,18 +299,6 @@ func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error
 			bodySeeker = newReadSeekCloser(data)
 			origReq.Body = bodySeeker
 		}
-	}
-
-	origCtx := origReq.Context()
-
-	// maxAttempts and attemptTimeout can be overridden per request through context
-	maxAttempts := rt.maxAttempts
-	if val, ok := GetMaxAttemptsFromContext(origCtx); ok {
-		maxAttempts = val
-	}
-	attemptTimeout := rt.attemptTimeout
-	if val, ok := GetAttemptTimeoutFromContext(origCtx); ok {
-		attemptTimeout = val
 	}
 
 	attempt := 0
@@ -304,10 +318,31 @@ func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error
 	}
 }
 
+// readRequestBody reads a request body, closing it when the context is done.
+// Closing is the only portable way to unblock a Read that never returns, so a
+// stalled body cannot pin the request past its deadline.
+func readRequestBody(ctx context.Context, body io.ReadCloser) ([]byte, error) {
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			body.Close()
+		case <-done:
+		}
+	}()
+	return io.ReadAll(body)
+}
+
 // newAttemptContext returns a timeout-derived context and its cancel function,
 // or the parent context and a nil cancel function if no timeout is specified.
+// A negative timeout means the default applies, so TimeoutNotSet in the
+// context does not turn into an already expired deadline.
 func newAttemptContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
-	if timeout == NoTimeout {
+	if timeout < NoTimeout {
+		timeout = DefaultAttemptTimeout
+	}
+	if timeout <= NoTimeout {
 		return parent, nil
 	}
 	return context.WithTimeout(parent, timeout)
@@ -318,8 +353,14 @@ func newAttemptContext(parent context.Context, timeout time.Duration) (context.C
 func (rt *NiceTransport) roundTripAttempt(origCtx context.Context, origReq *http.Request, attemptTimeout time.Duration, lastAttempt bool) (resp *http.Response, final bool, err error) {
 	// Wait patiently for the limiter before sending the request up to the context deadline
 	if err := rt.limiter.Wait(origCtx); err != nil {
-		// The original context is cancelled or has exceeded deadline
-		return nil, true, err
+		if origCtx.Err() != nil {
+			// The original context is cancelled or has exceeded deadline
+			return nil, true, err
+		}
+		// Waiting for the next attempt would run past the deadline, which the
+		// limiter rejects up front instead of sleeping. The caller's context
+		// is still live, so say why this is not a real context expiry.
+		return nil, true, fmt.Errorf("nicehttp: next attempt does not fit before the request deadline: %w", err)
 	}
 
 	needsRetry := true
@@ -361,7 +402,7 @@ func (rt *NiceTransport) roundTripAttempt(origCtx context.Context, origReq *http
 	needsRetry = shouldRetryRequest(origReq, resp, err)
 	retryAfter = parseRetryAfterHeader(resp)
 
-	if lastAttempt || !needsRetry {
+	if lastAttempt || !needsRetry || !rt.limiter.allowsRetryWithin(origCtx, needsRetry, retryAfter) {
 		// Hand off context ownership to the response body wrapper if successful
 		if cancelAttemptCtx != nil && resp != nil && resp.Body != nil {
 			resp.Body = &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancelAttemptCtx}

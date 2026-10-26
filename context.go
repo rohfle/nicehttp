@@ -26,6 +26,8 @@ func GetRetryNonIdempotentFromContext(ctx context.Context) bool {
 }
 
 // SetAttemptTimeoutInContext returns a new context with the given timeout value.
+// A negative value means DefaultAttemptTimeout applies, and NoTimeout disables
+// the per attempt deadline.
 func SetAttemptTimeoutInContext(parent context.Context, timeout time.Duration) context.Context {
 	return context.WithValue(parent, attemptTimeoutKey{}, timeout)
 }
@@ -36,7 +38,9 @@ func GetAttemptTimeoutFromContext(ctx context.Context) (time.Duration, bool) {
 	return val, ok
 }
 
-// SetMaxAttemptsInContext returns a new context with the given max attempts value.
+// SetMaxAttemptsInContext returns a new context with the given max attempts
+// value. The value is clamped to 1 through 100 when a request is made,
+// matching the per host config.
 func SetMaxAttemptsInContext(parent context.Context, attempts int) context.Context {
 	return context.WithValue(parent, maxAttemptsKey{}, attempts)
 }

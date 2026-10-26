@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -257,7 +258,8 @@ func TestRoundTripperSecondRun(t *testing.T) {
 }
 
 func TestRoundTripperThirdRun(t *testing.T) {
-	// deadline around 0.5 * RequestInterval
+	// deadline around 0.5 * RequestInterval, so the next wait cannot fit and
+	// the retry is not attempted: the 504 response is handed back as is
 	backoff := NewBackoff(500*time.Millisecond, 500*time.Millisecond, DefaultBackoffCoefficients)
 	settings := NewNiceTransportBuilder().
 		SetLimiterBackoff(backoff).
@@ -301,9 +303,19 @@ func TestRoundTripperThirdRun(t *testing.T) {
 	}
 
 	resp, err := client.Do(req)
-	if err == nil {
-		resp.Body.Close()
-		t.Fatalf("expected context deadline exceeded error but got response status %d", resp.StatusCode)
+	if err != nil {
+		t.Fatalf("expected the 504 response, got error: %s", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 504 {
+		t.Fatalf("expected 504 response but got status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("unexpected error while reading the response body: %s", err)
+	}
+	if string(body) != "Gateway Timeout" {
+		t.Fatalf("expected response body %q, got %q", "Gateway Timeout", string(body))
 	}
 
 	if endpoint.CallCount != expectedCalls {
@@ -311,6 +323,121 @@ func TestRoundTripperThirdRun(t *testing.T) {
 	}
 
 	t.Logf("calls: %d, timings in ms: %+v", endpoint.CallCount, endpoint.Timings)
+}
+
+// TestRoundTripperRetryAfterBeyondDeadline checks that a Retry-After the
+// caller cannot wait for is not waited out: the 503 response is returned.
+func TestRoundTripperRetryAfterBeyondDeadline(t *testing.T) {
+	calls := 0
+	endpoint := &MockEndpoint{
+		CallCount: 0,
+		Start:     time.Time{},
+		Timings:   nil,
+		Deadline:  time.Time{},
+		Handler: func(_ *MockEndpoint, _ int, _ *http.Request) (*http.Response, error) {
+			calls++
+			return &http.Response{
+				StatusCode: 503,
+				Body:       io.NopCloser(strings.NewReader("Service Unavailable")),
+				Header:     http.Header{"Retry-After": {"3600"}},
+			}, nil
+		},
+	}
+
+	settings := &NiceTransport{
+		limiter:     NewLimiter(NewBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultBackoffCoefficients)),
+		maxAttempts: 3,
+	}
+	client := createClientWithEndpoint(settings, endpoint)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://example.com", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequestWithContext failed: %s", err)
+	}
+
+	start := time.Now()
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("expected the 503 response, got error: %s", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 503 {
+		t.Fatalf("expected 503 response but got status %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("unexpected error while reading the response body: %s", err)
+	}
+	if string(data) != "Service Unavailable" {
+		t.Fatalf("expected response body %q, got %q", "Service Unavailable", string(data))
+	}
+	if calls != 1 {
+		t.Fatalf("expected one attempt, got %d", calls)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("expected the response without waiting out Retry-After, took %s", elapsed)
+	}
+}
+
+// TestRoundTripperMaxAttemptsClamped checks that the per request override is
+// clamped like the per host config, so a bad value cannot cause an unbounded
+// retry loop.
+func TestRoundTripperMaxAttemptsClamped(t *testing.T) {
+	tests := []struct {
+		name     string
+		attempts int
+		want     int
+	}{
+		{name: "zero", attempts: 0, want: 1},
+		{name: "negative", attempts: -3, want: 1},
+		{name: "above limit", attempts: maxAttemptsLimit + 1, want: maxAttemptsLimit},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			endpoint := &MockEndpoint{
+				CallCount: 0,
+				Start:     time.Time{},
+				Timings:   nil,
+				Deadline:  time.Time{},
+				Handler: func(_ *MockEndpoint, _ int, _ *http.Request) (*http.Response, error) {
+					calls++
+					return &http.Response{
+						StatusCode: 503,
+						Body:       io.NopCloser(strings.NewReader("Service Unavailable")),
+						Header:     make(http.Header),
+					}, nil
+				},
+			}
+
+			settings := &NiceTransport{
+				limiter:     NewLimiter(NewBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultBackoffCoefficients)),
+				maxAttempts: 3,
+			}
+			client := createClientWithEndpoint(settings, endpoint)
+
+			ctx := SetMaxAttemptsInContext(context.Background(), test.attempts)
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://example.com", nil)
+			if err != nil {
+				t.Fatalf("http.NewRequestWithContext failed: %s", err)
+			}
+
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("expected the 503 response, got error: %s", err)
+			}
+			resp.Body.Close()
+
+			if calls != test.want {
+				t.Errorf("expected %d attempts, got %d", test.want, calls)
+			}
+		})
+	}
 }
 
 func TestRoundTripperFourthRun(t *testing.T) {
@@ -611,6 +738,64 @@ func TestRoundTripperAttemptTimeoutOverride(t *testing.T) {
 	}
 }
 
+// TestRoundTripperAttemptTimeoutUnsetContext checks that TimeoutNotSet or a
+// negative timeout in the context means the default, rather than a deadline
+// that has already expired and cancels every attempt before it is sent.
+func TestRoundTripperAttemptTimeoutUnsetContext(t *testing.T) {
+	restore := DefaultAttemptTimeout
+	DefaultAttemptTimeout = NoTimeout
+	defer func() { DefaultAttemptTimeout = restore }()
+
+	for _, timeout := range []time.Duration{TimeoutNotSet, -2 * time.Second} {
+		var calls int
+		var hasDeadline bool
+
+		endpoint := &MockEndpoint{
+			CallCount: 0,
+			Start:     time.Time{},
+			Timings:   nil,
+			Deadline:  time.Time{},
+			Handler: func(_ *MockEndpoint, _ int, req *http.Request) (*http.Response, error) {
+				calls++
+				_, hasDeadline = req.Context().Deadline()
+				if err := req.Context().Err(); err != nil {
+					return nil, err
+				}
+				return &http.Response{
+					StatusCode: 200,
+					Body:       io.NopCloser(strings.NewReader("OK")),
+					Header:     make(http.Header),
+				}, nil
+			},
+		}
+
+		settings := &NiceTransport{
+			limiter:     NewLimiter(NewBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultBackoffCoefficients)),
+			maxAttempts: 3,
+		}
+		client := createClientWithEndpoint(settings, endpoint)
+
+		ctx := SetAttemptTimeoutInContext(context.Background(), timeout)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://example.com", nil)
+		if err != nil {
+			t.Fatalf("http.NewRequestWithContext failed: %s", err)
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("timeout %v: expected 200 response, got error: %s", timeout, err)
+		}
+		resp.Body.Close()
+
+		if calls != 1 {
+			t.Errorf("timeout %v: expected one attempt, got %d", timeout, calls)
+		}
+		if hasDeadline {
+			t.Errorf("timeout %v: expected no attempt deadline from the default", timeout)
+		}
+	}
+}
+
 func TestRoundTripperAttemptTimeoutBodyRead(t *testing.T) {
 	// The body arrives only after the response headers, like any streamed or
 	// large response. Reading it must not be aborted by the attempt timeout.
@@ -643,6 +828,128 @@ func TestRoundTripperAttemptTimeoutBodyRead(t *testing.T) {
 	}
 	if string(data) != "hello" {
 		t.Fatalf("expected body %q, got %q", "hello", string(data))
+	}
+}
+
+// passthroughBody is a non-seekable request body that records whether the
+// transport forwarded it instead of buffering it.
+type passthroughBody struct {
+	io.Reader
+}
+
+func (b *passthroughBody) Close() error {
+	return nil
+}
+
+// TestRoundTripperRequestBodyReadBoundedByContext checks that a non-seekable
+// body that never returns cannot pin the request past the caller's deadline
+// while it is buffered for retries.
+func TestRoundTripperRequestBodyReadBoundedByContext(t *testing.T) {
+	calls := 0
+	endpoint := &MockEndpoint{
+		CallCount: 0,
+		Start:     time.Time{},
+		Timings:   nil,
+		Deadline:  time.Time{},
+		Handler: func(_ *MockEndpoint, _ int, _ *http.Request) (*http.Response, error) {
+			calls++
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader("OK")),
+				Header:     make(http.Header),
+			}, nil
+		},
+	}
+
+	settings := &NiceTransport{
+		limiter:     NewLimiter(NewBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultBackoffCoefficients)),
+		maxAttempts: 2,
+	}
+	client := createClientWithEndpoint(settings, endpoint)
+
+	body, writer := io.Pipe()
+	defer writer.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://example.com", body)
+	if err != nil {
+		t.Fatalf("http.NewRequestWithContext failed: %s", err)
+	}
+
+	start := time.Now()
+	if _, err := client.Do(req); err == nil {
+		t.Fatal("expected the request body read to be cancelled by the deadline")
+	} else if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context deadline exceeded, got error %s", err)
+	}
+
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("expected the body read to stop near the 100ms deadline, took %s", elapsed)
+	}
+	if calls != 0 {
+		t.Fatalf("expected no request to be sent, got %d", calls)
+	}
+}
+
+// TestRoundTripperSingleAttemptBodyPassthrough checks that with one attempt a
+// non-seekable body is sent as is, because there is nothing to replay, and
+// that the skipped buffering is reported.
+func TestRoundTripperSingleAttemptBodyPassthrough(t *testing.T) {
+	body := &passthroughBody{Reader: strings.NewReader("hello")}
+	var received string
+	var forwarded bool
+
+	endpoint := &MockEndpoint{
+		CallCount: 0,
+		Start:     time.Time{},
+		Timings:   nil,
+		Deadline:  time.Time{},
+		Handler: func(_ *MockEndpoint, _ int, req *http.Request) (*http.Response, error) {
+			_, forwarded = req.Body.(*passthroughBody)
+			data, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatalf("unexpected error while reading the request body: %s", err)
+			}
+			received = string(data)
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader("OK")),
+				Header:     make(http.Header),
+			}, nil
+		},
+	}
+
+	settings := &NiceTransport{
+		limiter:     NewLimiter(NewBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultBackoffCoefficients)),
+		maxAttempts: 1,
+	}
+	client := createClientWithEndpoint(settings, endpoint)
+
+	var logs bytes.Buffer
+	previousOutput := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(previousOutput)
+
+	req, err := http.NewRequest(http.MethodPost, "http://example.com", body)
+	if err != nil {
+		t.Fatalf("http.NewRequest failed: %s", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("expected 200 response, got error: %s", err)
+	}
+	resp.Body.Close()
+
+	if !forwarded {
+		t.Error("expected the non-seekable body to be sent as is instead of being buffered")
+	}
+	if received != "hello" {
+		t.Errorf("expected the request body %q, got %q", "hello", received)
+	}
+	if !strings.Contains(logs.String(), "not buffered") {
+		t.Errorf("expected a warning that the body was not buffered, got %q", logs.String())
 	}
 }
 

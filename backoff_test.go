@@ -102,3 +102,26 @@ func TestNewBackoffFromMapErrors(t *testing.T) {
 		})
 	}
 }
+
+// TestBackoffPreviewWaitBoundsUpdate checks that previewWait is never shorter
+// than the wait Update actually sets, because the retry feasibility check
+// refuses to wait only when it cannot fit before the deadline.
+func TestBackoffPreviewWaitBoundsUpdate(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		for range 100 {
+			backoff := NewBackoff(time.Second, 2*time.Second, DefaultBackoffCoefficients)
+			preview := backoff.previewWait(fail, 0)
+			actual := backoff.Update(fail, 0)
+			if actual > preview {
+				t.Fatalf("fail=%v: Update set %s, above the previewed %s", fail, actual, preview)
+			}
+		}
+	}
+
+	// A Retry-After override is deterministic, so the preview matches exactly
+	backoff := NewBackoff(time.Millisecond, time.Millisecond, DefaultBackoffCoefficients)
+	preview := backoff.previewWait(true, 90*time.Second)
+	if actual := backoff.Update(true, 90*time.Second); actual != preview {
+		t.Fatalf("override: Update set %s, previewed %s", actual, preview)
+	}
+}

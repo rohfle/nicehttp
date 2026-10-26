@@ -82,7 +82,9 @@ func (b *NiceTransportBuilder) SetUserAgent(ua string) *NiceTransportBuilder {
 	return b
 }
 
-// SetMaxAttempts sets the maximum number of request attempts that will be made
+// SetMaxAttempts sets the maximum number of request attempts that will be
+// made. The value is clamped to 1 through 100 when a request is made, matching
+// the per host config.
 func (b *NiceTransportBuilder) SetMaxAttempts(n int) *NiceTransportBuilder {
 	b.maxAttempts = n
 	return b

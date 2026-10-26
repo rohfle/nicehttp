@@ -66,6 +66,18 @@ func (rl *Limiter) Wait(ctx context.Context) error {
 	return nil
 }
 
+// allowsRetryWithin reports whether the wait that follows this outcome would
+// still start before the context deadline. Without a deadline a retry is
+// always allowed. The estimate is the longest wait the backoff may set, so
+// waiting is only refused when it certainly cannot fit.
+func (rl *Limiter) allowsRetryWithin(ctx context.Context, retry bool, waitOverride time.Duration) bool {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return true
+	}
+	return time.Now().Add(rl.backoff.previewWait(retry, waitOverride)).Before(deadline)
+}
+
 // Done records the outcome of an attempt and releases the host's turn, which
 // Wait acquired. The outcome updates the backoff (see Backoff.Update), so
 // it determines how long the next caller waits.

@@ -156,7 +156,8 @@ func PerHostConfigFromMap(settings map[string]any) (PerHostConfig, error) {
 	return config, nil
 }
 
-// maxAttemptsLimit bounds the parsed max_attempts value so a typo is reported
+// maxAttemptsLimit bounds max_attempts, whether parsed from config, set on the
+// builder or overridden through the context, so a typo is reported or clamped
 // instead of turning into a multi-minute retry loop.
 const maxAttemptsLimit = 100
 

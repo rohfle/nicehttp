@@ -38,6 +38,10 @@ var DefaultBackoffCoefficients = BackoffCoefficients{
 // DefaultBackoff is the default backoff - 1s growing to 120s with default coefficients.
 var DefaultBackoff = NewBackoff(1*time.Second, 120*time.Second, DefaultBackoffCoefficients)
 
+// maxRetryAfterWait caps a server supplied Retry-After wait, so a request for
+// days cannot stall the host.
+const maxRetryAfterWait = 24 * time.Hour
+
 // NewBackoffFromMap builds a Backoff from a config map. Keys that are absent
 // are taken from base, or from DefaultBackoff when base is nil.
 //
@@ -173,18 +177,41 @@ func (adj *Backoff) Update(fail bool, newWait time.Duration) time.Duration {
 		// when it will be ready, but an absurd value must not block forever.
 		// The lower bound below still applies, so a Retry-After shorter than
 		// MinWait is raised to MinWait.
-		maxWait = 24 * time.Hour
+		maxWait = maxRetryAfterWait
 	}
 
-	// Clamp minWait <= newWait <= maxWait
-	if newWait < adj.MinWait {
-		newWait = adj.MinWait
-	} else if newWait > maxWait {
-		newWait = maxWait
-	}
-	adj.wait = newWait
+	adj.wait = clampWait(newWait, adj.MinWait, maxWait)
 	adj.last = time.Now()
 	return adj.wait
+}
+
+// previewWait returns the longest wait Update may set for the same outcome,
+// without modifying the backoff or stamping the time. The normal schedule uses
+// the upper end of the jitter range, so a wait that fits is certain to fit.
+func (adj *Backoff) previewWait(fail bool, newWait time.Duration) time.Duration {
+	maxWait := adj.MaxWait
+
+	if newWait == 0 {
+		multiplier := adj.Coeff.Success
+		if fail {
+			multiplier = adj.Coeff.Fail
+		}
+		newWait = time.Duration(multiplier * (1 + adj.Coeff.Jitter/2) * float64(adj.wait))
+	} else {
+		maxWait = maxRetryAfterWait
+	}
+	return clampWait(newWait, adj.MinWait, maxWait)
+}
+
+// clampWait bounds a wait to minWait..maxWait.
+func clampWait(wait time.Duration, minWait time.Duration, maxWait time.Duration) time.Duration {
+	if wait < minWait {
+		return minWait
+	}
+	if wait > maxWait {
+		return maxWait
+	}
+	return wait
 }
 
 // UntilNext returns how long to wait from now until the next attempt.

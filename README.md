@@ -147,11 +147,15 @@ A runnable version is in [`example_test.go`](./example_test.go) (`ExampleNewNice
 
 ## Retries
 
-An attempt is retried up to `maxAttempts`. An attempt timeout is always retried, and a cancelled or expired
-caller context never is.
+An attempt is retried up to `maxAttempts`, and a cancelled or expired caller context is never retried.
 
-After a transport error or a `504 Gateway Timeout` the client cannot know whether the request reached the
-server, so only a request that is safe to replay is retried:
+`DefaultAttemptTimeout` is `NoTimeout`, so do not rely on an implicit per-attempt deadline: bound requests with
+`http.Client.Timeout` or a context deadline, as the examples above do with 10 minutes. When the next backoff wait
+cannot start before the caller's deadline, the client stops retrying and returns the last response instead of
+waiting for the deadline to expire.
+
+After an attempt timeout, a transport error or a `504 Gateway Timeout` the client cannot know whether the
+request reached the server, so only a request that is safe to replay is retried:
 
 - safe methods: `GET`, `HEAD`, `PUT`, `DELETE`, `OPTIONS`, `TRACE`
 - a `POST` or `PATCH` carrying an `Idempotency-Key` header
