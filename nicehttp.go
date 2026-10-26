@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"runtime/debug"
 	"strconv"
@@ -94,6 +93,8 @@ var (
 // before the caller's deadline.
 const discardedBodyLimit = 4096
 
+// readSeekCloser adds Close to a *bytes.Reader, which already provides Read
+// and Seek. io.NopCloser does not preserve Seek, so it cannot be used here.
 type readSeekCloser struct {
 	*bytes.Reader
 }
@@ -253,7 +254,7 @@ func replayable(req *http.Request) bool {
 func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error) {
 	if rt.limiter == nil {
 		// A transport without a limiter cannot back off between attempts
-		return nil, fmt.Errorf("nicehttp: transport has no limiter, create it with NewNiceTransportBuilder")
+		return nil, fmt.Errorf("nicehttp: transport has no limiter, create it with NewNiceTransportBuilder().Build()")
 	}
 
 	origCtx := origReq.Context()
@@ -307,7 +308,9 @@ func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error
 
 	// saved is the last retryable response, with its body already drained into
 	// memory. It is handed back when the next attempt cannot start before the
-	// deadline, rather than discarding the server's answer.
+	// deadline, rather than discarding the server's answer. Returning it after
+	// the attempt context is cancelled is safe because saveDiscardedResponse
+	// has already materialised the body.
 	var saved *http.Response
 	attempt := 0
 	for {
@@ -316,7 +319,7 @@ func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error
 		if err := rt.limiter.Wait(origCtx); err != nil {
 			if origCtx.Err() != nil {
 				// The original context is cancelled or has exceeded deadline
-				return nil, err
+				return nil, origCtx.Err()
 			}
 			if saved != nil {
 				// The retry cannot start in time, so return what the server
@@ -336,7 +339,11 @@ func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error
 		if !retry {
 			return resp, err
 		}
-		saved = resp
+		// Keep the last server answer: a retryable transport error returns no
+		// response, and must not discard the earlier one.
+		if resp != nil {
+			saved = resp
+		}
 
 		if bodySeeker != nil {
 			// Rewind the body to the start on retry
@@ -490,7 +497,6 @@ func parseRetryAfterHeader(resp *http.Response) time.Duration {
 		if t, err := http.ParseTime(val); err == nil {
 			return time.Until(t)
 		}
-		log.Printf("nicehttp: unexpected formatting of Retry-After value %q", val)
 	}
 	return 0
 }
