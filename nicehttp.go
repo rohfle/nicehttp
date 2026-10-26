@@ -251,6 +251,9 @@ func replayable(req *http.Request) bool {
 // visible here: http.Client.Timeout is a timer outside the context, so the
 // retry cutoff does not apply and a request bounded only by it runs until the
 // timer fires and fails with the client's timeout error.
+//
+// The caller's request is not modified, except that its body is consumed and
+// closed, as the RoundTripper contract requires.
 func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error) {
 	if rt.limiter == nil {
 		// A transport without a limiter cannot back off between attempts
@@ -274,17 +277,20 @@ func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error
 
 	// in order to retry requests, we need io.Seeker to support rewinding the body
 	var bodySeeker io.ReadSeekCloser
+	// attemptBody is sent instead of the caller's body. It stays nil when the
+	// body can be sent as is, so the caller's request is never modified.
+	var attemptBody io.ReadCloser
 	// The body might be nil for some methods (eg GET / HEAD). A non-seekable
 	// body is only buffered when a retry can occur; with a single attempt it is
 	// sent as is, and the downstream roundtripper owns and closes it.
 	if origReq.Body != nil {
 		if seeker, ok := origReq.Body.(io.ReadSeekCloser); ok {
-			// The body is seekable so we can stream the original
+			// The body is seekable, so the same body can serve every attempt
 			// Defer the close of the original request body
 			originalBody := origReq.Body
 			defer func() { _ = originalBody.Close() }()
-			// Prevent downstream roundtripper from closing the body
-			origReq.Body = io.NopCloser(seeker)
+			// Wrap it so a downstream Close cannot end the body before retries
+			attemptBody = io.NopCloser(seeker)
 			bodySeeker = seeker
 		} else if maxAttempts > 1 {
 			// The body is not seekable, so read it fully into memory to be
@@ -302,7 +308,7 @@ func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error
 			// With the read data, create a new bytes.Reader with noop Close()
 			// No need to defer closing the bytes.Reader
 			bodySeeker = newReadSeekCloser(data)
-			origReq.Body = bodySeeker
+			attemptBody = bodySeeker
 		}
 	}
 
@@ -335,7 +341,7 @@ func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error
 		// This loop will run up to maxAttempts times
 		attempt++
 
-		resp, retry, err := rt.roundTripAttempt(origCtx, origReq, attemptTimeout, attempt >= maxAttempts)
+		resp, retry, err := rt.roundTripAttempt(origCtx, origReq, attemptBody, attemptTimeout, attempt >= maxAttempts)
 		if !retry {
 			return resp, err
 		}
@@ -386,8 +392,10 @@ func newAttemptContext(parent context.Context, timeout time.Duration) (context.C
 
 // roundTripAttempt executes a single request attempt, returning whether the
 // response is eligible for a retry. The caller must hold the limiter, having
-// acquired it with Wait, and the deferred Done releases it.
-func (rt *NiceTransport) roundTripAttempt(origCtx context.Context, origReq *http.Request, attemptTimeout time.Duration, lastAttempt bool) (resp *http.Response, retry bool, err error) {
+// acquired it with Wait, and the deferred Done releases it. A non-nil
+// attemptBody replaces the body of the request sent downstream, so the
+// caller's request is left untouched.
+func (rt *NiceTransport) roundTripAttempt(origCtx context.Context, origReq *http.Request, attemptBody io.ReadCloser, attemptTimeout time.Duration, lastAttempt bool) (resp *http.Response, retry bool, err error) {
 	needsRetry := true
 	var retryAfter time.Duration
 
@@ -401,6 +409,9 @@ func (rt *NiceTransport) roundTripAttempt(origCtx context.Context, origReq *http
 
 	// Clone the request with the attempt-specific context
 	req := origReq.Clone(ctx)
+	if attemptBody != nil {
+		req.Body = attemptBody
+	}
 
 	// Set default headers (used for User-Agent and Authorization) on the
 	// request sent downstream. The request given by the caller is left

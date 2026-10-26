@@ -1171,6 +1171,81 @@ func TestRoundTripperSingleAttemptBodyPassthrough(t *testing.T) {
 	}
 }
 
+// TestRoundTripDoesNotMutateCallerBody checks the RoundTripper contract: the
+// caller's request keeps its Body value while retries replay a prepared copy.
+func TestRoundTripDoesNotMutateCallerBody(t *testing.T) {
+	tests := []struct {
+		name string
+		body func() io.ReadCloser
+	}{
+		{name: "seekable", body: func() io.ReadCloser {
+			return newReadSeekCloser([]byte("payload"))
+		}},
+		{name: "non seekable", body: func() io.ReadCloser {
+			return &passthroughBody{Reader: strings.NewReader("payload")}
+		}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			endpoint := &MockEndpoint{
+				CallCount: 0,
+				Start:     time.Time{},
+				Timings:   nil,
+				Deadline:  time.Time{},
+				Handler: func(_ *MockEndpoint, _ int, req *http.Request) (*http.Response, error) {
+					calls++
+					data, err := io.ReadAll(req.Body)
+					if err != nil {
+						t.Fatalf("call %d: unexpected error while reading the body: %s", calls, err)
+					}
+					if string(data) != "payload" {
+						t.Fatalf("call %d: expected body %q, got %q", calls, "payload", string(data))
+					}
+					if calls == 1 {
+						return &http.Response{
+							StatusCode: 503,
+							Body:       io.NopCloser(strings.NewReader("Service Unavailable")),
+							Header:     make(http.Header),
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: 200,
+						Body:       io.NopCloser(strings.NewReader("OK")),
+						Header:     make(http.Header),
+					}, nil
+				},
+			}
+
+			settings := &NiceTransport{
+				limiter:     NewLimiter(NewBackoff(1*time.Millisecond, 1*time.Millisecond, DefaultBackoffCoefficients)),
+				maxAttempts: 2,
+			}
+			client := createClientWithEndpoint(settings, endpoint)
+
+			body := test.body()
+			req, err := http.NewRequest(http.MethodPost, "http://example.com", body)
+			if err != nil {
+				t.Fatalf("http.NewRequest failed: %s", err)
+			}
+
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("expected 200 response, got error: %s", err)
+			}
+			resp.Body.Close()
+
+			if req.Body != body {
+				t.Error("expected the caller's request body to be unchanged")
+			}
+			if calls != 2 {
+				t.Errorf("expected 2 attempts, got %d", calls)
+			}
+		})
+	}
+}
+
 func TestRoundTripperRetryWithConnectionLimit(t *testing.T) {
 	// The body of a retriable response must be released before retrying,
 	// because it holds on to its connection. With the connection limit of one
