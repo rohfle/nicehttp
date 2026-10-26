@@ -3,7 +3,10 @@ package nicehttp
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"math"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -222,6 +225,9 @@ func TestPerHostConfigFromMapErrors(t *testing.T) {
 			"default_headers": map[string]any{"x-foo": "1", "X-Foo": "2"},
 		}}, "duplicate header after canonicalization"},
 		{"unknown config key", map[string]any{"defaults": map[string]any{"nope": 1}}, "defaults.nope: unknown key"},
+		{"host config error", map[string]any{"hosts": map[string]any{
+			"a.example.com": map[string]any{"max_attempts": 0},
+		}}, "hosts[a.example.com].max_attempts"},
 		{"max_attempts not a number", map[string]any{"defaults": map[string]any{"max_attempts": "three"}}, "max_attempts: must be a whole number"},
 		{"max_attempts zero", map[string]any{"defaults": map[string]any{"max_attempts": 0}}, "must be a whole number between 1 and"},
 		{"max_attempts fractional", map[string]any{"defaults": map[string]any{"max_attempts": 1.5}}, "must be a whole number between 1 and"},
@@ -763,5 +769,287 @@ func TestNicePerHostTransportRejectsInvalidHosts(t *testing.T) {
 	}
 	if len(runner.transports) != 0 || len(runner.dynamic) != 0 {
 		t.Errorf("invalid hosts were cached: %d transports, %d dynamic", len(runner.transports), len(runner.dynamic))
+	}
+}
+
+// trackingBody records whether the transport closed it.
+type trackingBody struct {
+	io.Reader
+	closed bool
+}
+
+func (b *trackingBody) Close() error {
+	b.closed = true
+	return nil
+}
+
+// TestNicePerHostTransportRoundTripErrors checks the rejection paths and that
+// a request body is closed when the request cannot be dispatched.
+func TestNicePerHostTransportRoundTripErrors(t *testing.T) {
+	transport, err := NewNicePerHostTransport(PerHostConfig{})
+	if err != nil {
+		t.Fatalf("while creating transport: %s", err)
+	}
+
+	if _, err := transport.RoundTrip(nil); err == nil || !strings.Contains(err.Error(), "invalid request URL") {
+		t.Errorf("expected an invalid request URL error, got %v", err)
+	}
+
+	tests := []struct {
+		name string
+		url  *url.URL
+		want string
+	}{
+		{name: "nil url", url: nil, want: "invalid request URL"},
+		{name: "empty host", url: &url.URL{}, want: "invalid request URL"},
+		{name: "invalid host", url: &url.URL{Host: "bad host"}, want: "NicePerHostTransport.RoundTrip"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := &trackingBody{Reader: strings.NewReader("payload")}
+			req := &http.Request{URL: test.url, Body: body}
+
+			if _, err := transport.RoundTrip(req); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Errorf("expected an error containing %q, got %v", test.want, err)
+			}
+			if !body.closed {
+				t.Error("expected the request body to be closed")
+			}
+		})
+	}
+}
+
+func TestInt64FromValue(t *testing.T) {
+	tests := []struct {
+		name  string
+		value any
+		want  int64
+		ok    bool
+	}{
+		{name: "int", value: int(42), want: 42, ok: true},
+		{name: "int8", value: int8(-8), want: -8, ok: true},
+		{name: "int16", value: int16(-16), want: -16, ok: true},
+		{name: "int32", value: int32(-32), want: -32, ok: true},
+		{name: "int64", value: int64(-64), want: -64, ok: true},
+		{name: "uint", value: uint(7), want: 7, ok: true},
+		{name: "uint8", value: uint8(8), want: 8, ok: true},
+		{name: "uint16", value: uint16(16), want: 16, ok: true},
+		{name: "uint32", value: uint32(32), want: 32, ok: true},
+		{name: "uint64 max int64", value: uint64(1<<63 - 1), want: 1<<63 - 1, ok: true},
+		{name: "uint64 overflow", value: uint64(1) << 63, want: 0, ok: false},
+		{name: "json number", value: json.Number("42"), want: 42, ok: true},
+		{name: "json number overflow", value: json.Number("9223372036854775808"), ok: false},
+		{name: "json number fractional", value: json.Number("4.2"), ok: false},
+		{name: "string", value: "42", ok: false},
+		{name: "nil", value: nil, ok: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := int64FromValue(test.value)
+			if ok != test.ok {
+				t.Fatalf("expected ok=%v, got %v", test.ok, ok)
+			}
+			if ok && got != test.want {
+				t.Errorf("expected %d, got %d", test.want, got)
+			}
+		})
+	}
+}
+
+func TestIsZeroNumber(t *testing.T) {
+	tests := []struct {
+		name  string
+		value any
+		want  bool
+	}{
+		{name: "int zero", value: 0, want: true},
+		{name: "int nonzero", value: 1, want: false},
+		{name: "float32 zero", value: float32(0), want: true},
+		{name: "float32 nonzero", value: float32(0.5), want: false},
+		{name: "float64 zero", value: float64(0), want: true},
+		{name: "float64 nonzero", value: float64(0.5), want: false},
+		{name: "json integer zero", value: json.Number("0"), want: true},
+		{name: "json decimal zero", value: json.Number("0.0"), want: true},
+		{name: "json decimal nonzero", value: json.Number("0.1"), want: false},
+		{name: "json invalid", value: json.Number("nope"), want: false},
+		{name: "string", value: "0", want: false},
+		{name: "nil", value: nil, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isZeroNumber(test.value); got != test.want {
+				t.Errorf("expected %v, got %v", test.want, got)
+			}
+		})
+	}
+}
+
+func TestParseMaxAttempts(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   any
+		want    int
+		wantErr string
+	}{
+		{name: "int", value: 3, want: 3},
+		{name: "limit", value: maxAttemptsLimit, want: maxAttemptsLimit},
+		{name: "float64 whole", value: float64(3), want: 3},
+		{name: "float32 whole", value: float32(2), want: 2},
+		{name: "json number", value: json.Number("5"), want: 5},
+		{name: "json number fractional", value: json.Number("1.5"), wantErr: "must be a whole number between 1 and"},
+		{name: "json number invalid", value: json.Number("nope"), wantErr: "must be a whole number"},
+		{name: "fractional", value: 1.5, wantErr: "must be a whole number between 1 and"},
+		{name: "nan", value: math.NaN(), wantErr: "must be a whole number between 1 and"},
+		{name: "inf", value: math.Inf(1), wantErr: "must be a whole number between 1 and"},
+		{name: "string", value: "3", wantErr: "must be a whole number"},
+		{name: "zero", value: 0, wantErr: "must be a whole number between 1 and"},
+		{name: "negative", value: -1, wantErr: "must be a whole number between 1 and"},
+		{name: "above limit", value: maxAttemptsLimit + 1, wantErr: "must be a whole number between 1 and"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := parseMaxAttempts(test.value, "max_attempts")
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("expected an error containing %q, got %v", test.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %s", err)
+			}
+			if got != test.want {
+				t.Errorf("expected %d, got %d", test.want, got)
+			}
+		})
+	}
+}
+
+func TestKeyPath(t *testing.T) {
+	if got := keyPath("", "key"); got != "key" {
+		t.Errorf("expected %q, got %q", "key", got)
+	}
+	if got := keyPath("hosts[a.example.com]", "max_attempts"); got != "hosts[a.example.com].max_attempts" {
+		t.Errorf("unexpected dotted path %q", got)
+	}
+}
+
+func TestValidateHostNameBounds(t *testing.T) {
+	tests := []struct {
+		name string
+		host string
+		want string
+	}{
+		{name: "localhost", host: "localhost"},
+		{name: "idn", host: "exämple.com"},
+		{name: "ipv6", host: "[::1]"},
+		{name: "63 byte label", host: strings.Repeat("a", 63) + ".com"},
+		{name: "too long", host: strings.Repeat("a", 254), want: "is too long"},
+		{name: "label too long", host: strings.Repeat("a", 64) + ".com", want: "label is too long"},
+		{name: "empty label", host: "a..b", want: "must not contain empty labels"},
+		{name: "one trailing dot", host: "example.com."},
+		{name: "two trailing dots", host: "example.com..", want: "must not have more than one trailing dot"},
+		{name: "space", host: "bad host", want: "must be a hostname, without scheme, path or spaces"},
+		{name: "port", host: "example.com:80", want: "must not contain a port or scheme"},
+		{name: "scheme", host: "http://example.com", want: "must be a hostname, without scheme, path or spaces"},
+		{name: "invalid character", host: "bad!host", want: "contains invalid character"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateHostName(test.host)
+			if test.want == "" {
+				if err != nil {
+					t.Errorf("unexpected error: %s", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Errorf("expected an error containing %q, got %v", test.want, err)
+			}
+		})
+	}
+}
+
+func TestValidHeaderNameValue(t *testing.T) {
+	names := []struct {
+		name string
+		want bool
+	}{
+		{name: "X-Foo", want: true},
+		{name: "!#$%&'*+-.^_`|~", want: true},
+		{name: "", want: false},
+		{name: "Bad Header", want: false},
+		{name: "Bad:Header", want: false},
+		{name: "Bad\tName", want: false},
+	}
+	for _, test := range names {
+		if got := validHeaderName(test.name); got != test.want {
+			t.Errorf("validHeaderName(%q) = %v, want %v", test.name, got, test.want)
+		}
+	}
+
+	values := []struct {
+		value string
+		want  bool
+	}{
+		{value: "", want: true},
+		{value: "plain", want: true},
+		{value: "a\tb", want: true},
+		{value: "a b", want: true},
+		{value: "a\nb", want: false},
+		{value: "\x7f", want: false},
+		{value: "héllo", want: true},
+	}
+	for _, test := range values {
+		if got := validHeaderValue(test.value); got != test.want {
+			t.Errorf("validHeaderValue(%q) = %v, want %v", test.value, got, test.want)
+		}
+	}
+}
+
+func TestHostConfigCloneNil(t *testing.T) {
+	var config *HostConfig
+	clone := config.Clone()
+	if clone == nil {
+		t.Fatal("expected a config from a nil receiver")
+	}
+	if clone.MaxAttempts != 0 || clone.AttemptTimeout != nil || clone.Backoff != nil || clone.DefaultHeaders != nil {
+		t.Errorf("expected a zero config, got %+v", clone)
+	}
+}
+
+func TestParseHeadersStringList(t *testing.T) {
+	headers, err := parseHeaders(map[string]any{
+		"X-List": []string{"a", "b"},
+		"X-Null": nil,
+	}, "default_headers")
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if got := headers["X-List"]; len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Errorf("unexpected X-List values %v", got)
+	}
+	if got := headers["X-Null"]; len(got) != 0 {
+		t.Errorf("expected X-Null to be removed, got %v", got)
+	}
+}
+
+func TestParseAttemptTimeoutErrors(t *testing.T) {
+	tests := []struct {
+		name  string
+		value any
+		want  string
+	}{
+		{name: "non string", value: true, want: "must be a duration string"},
+		{name: "invalid duration", value: "soon", want: "invalid duration"},
+		{name: "negative", value: "-1s", want: "must be positive"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := parseAttemptTimeout(test.value, "attempt_timeout")
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("expected an error containing %q, got %v", test.want, err)
+			}
+		})
 	}
 }

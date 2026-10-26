@@ -125,3 +125,40 @@ func TestBackoffPreviewWaitBoundsUpdate(t *testing.T) {
 		t.Fatalf("override: Update set %s, previewed %s", actual, preview)
 	}
 }
+
+// TestFloatFromValue checks the numeric kinds accepted by NewBackoffFromMap,
+// including the finite check.
+func TestFloatFromValue(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   any
+		want    float64
+		wantErr string
+	}{
+		{name: "float64", value: 1.5, want: 1.5},
+		{name: "int", value: 2, want: 2},
+		{name: "int64", value: int64(3), want: 3},
+		{name: "nan", value: math.NaN(), wantErr: "must be finite"},
+		{name: "positive infinity", value: math.Inf(1), wantErr: "must be finite"},
+		{name: "negative infinity", value: math.Inf(-1), wantErr: "must be finite"},
+		{name: "string", value: "1", wantErr: "must be a number"},
+		{name: "nil", value: nil, wantErr: "must be a number"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := floatFromValue(test.value, "coefficients.jitter")
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("expected an error containing %q, got %v", test.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %s", err)
+			}
+			if got != test.want {
+				t.Errorf("expected %v, got %v", test.want, got)
+			}
+		})
+	}
+}
