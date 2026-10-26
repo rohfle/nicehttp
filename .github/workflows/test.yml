@@ -16,7 +16,7 @@ jobs:
 
     strategy:
       matrix:
-        go-version: [1.26, 1.27]
+        go-version: ["1.26", "1.27"]
 
     steps:
     - uses: actions/checkout@v4
@@ -33,5 +33,71 @@ jobs:
     - name: Vet
       run: go vet ./...
 
+    - name: Check go mod tidy
+      run: |
+        go mod tidy
+        git diff --exit-code go.mod go.sum
+
     - name: Test
-      run: go test -race -v ./...
+      run: >-
+        go test -race -shuffle=on -count=2 -timeout=60s
+        -covermode=atomic -coverprofile=coverage.out ./...
+
+    - name: Coverage gate
+      if: matrix.go-version == '1.27'
+      run: |
+        total=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%", "", $3); print $3}')
+        echo "total coverage: ${total}%"
+        awk -v total="$total" 'BEGIN { if (total < 92.0) { printf "coverage %s%% is below the 92%% gate\n", total; exit 1 } }'
+
+  serial:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.27'
+        cache: true
+
+    - name: Test with GOMAXPROCS=1
+      env:
+        GOMAXPROCS: "1"
+      run: go test -race -shuffle=on -count=2 -timeout=60s ./...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: go.mod
+        cache: true
+
+    - name: golangci-lint
+      uses: golangci/golangci-lint-action@v9
+      with:
+        version: v2.15.0
+
+    - name: govulncheck
+      uses: golang/govulncheck-action@v1
+      with:
+        go-version-file: go.mod
+        repo-checkout: false
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.27'
+        cache: true
+
+    - name: Fuzz config parsing
+      run: go test -run='^$' -fuzz='^FuzzPerHostConfigFromMap$' -fuzztime=20s .

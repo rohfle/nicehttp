@@ -309,14 +309,14 @@ func (t *NicePerHostTransport) evictLocked() {
 func (t *NicePerHostTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req == nil || req.URL == nil || req.URL.Hostname() == "" {
 		if req != nil && req.Body != nil {
-			req.Body.Close()
+			_ = req.Body.Close()
 		}
 		return nil, errors.New("invalid request URL: missing hostname")
 	}
 	transport, err := t.ForHost(req.URL.Hostname())
 	if err != nil {
 		if req.Body != nil {
-			req.Body.Close()
+			_ = req.Body.Close()
 		}
 		return nil, fmt.Errorf("NicePerHostTransport.RoundTrip: %w", err)
 	}

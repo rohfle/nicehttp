@@ -1189,10 +1189,10 @@ func TestRoundTripperRetryWithConnectionLimit(t *testing.T) {
 
 		if currentCall == 1 {
 			w.WriteHeader(503)
-			io.WriteString(w, "Service Unavailable") //nolint:errcheck
+			io.WriteString(w, "Service Unavailable")
 			return
 		}
-		io.WriteString(w, "OK") //nolint:errcheck
+		io.WriteString(w, "OK")
 	}))
 	defer server.Close()
 
@@ -1409,7 +1409,7 @@ func TestRoundTripperCloseIdleConnections(t *testing.T) {
 	closed := make(chan struct{}, 4)
 
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		io.WriteString(w, "OK") //nolint:errcheck
+		io.WriteString(w, "OK")
 	}))
 	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
 		switch state {
@@ -1430,7 +1430,7 @@ func TestRoundTripperCloseIdleConnections(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error while making request: %s", err)
 	}
-	io.ReadAll(resp.Body) //nolint:errcheck
+	io.ReadAll(resp.Body)
 	resp.Body.Close()
 
 	// The connection is idle, so nothing should have closed it yet
@@ -1549,7 +1549,7 @@ func TestZeroValueTransport(t *testing.T) {
 
 	// Not specifying a downstream transport means http.DefaultTransport is used
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		io.WriteString(w, "OK") //nolint:errcheck
+		io.WriteString(w, "OK")
 	}))
 	defer server.Close()
 

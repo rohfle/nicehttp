@@ -273,26 +273,25 @@ func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error
 
 	// in order to retry requests, we need io.Seeker to support rewinding the body
 	var bodySeeker io.ReadSeekCloser
-	// the body might be nil for some methods (eg GET / HEAD)
+	// The body might be nil for some methods (eg GET / HEAD). A non-seekable
+	// body is only buffered when a retry can occur; with a single attempt it is
+	// sent as is, and the downstream roundtripper owns and closes it.
 	if origReq.Body != nil {
 		if seeker, ok := origReq.Body.(io.ReadSeekCloser); ok {
 			// The body is seekable so we can stream the original
 			// Defer the close of the original request body
-			defer origReq.Body.Close()
+			originalBody := origReq.Body
+			defer func() { _ = originalBody.Close() }()
 			// Prevent downstream roundtripper from closing the body
 			origReq.Body = io.NopCloser(seeker)
 			bodySeeker = seeker
-		} else if maxAttempts == 1 {
-			// No retry can occur, so send the body as is instead of reading it
-			// into memory for nothing. The downstream roundtripper owns and
-			// closes it, as it does for any other request.
-		} else {
+		} else if maxAttempts > 1 {
 			// The body is not seekable, so read it fully into memory to be
 			// able to replay it. The read is bounded by the caller context:
 			// closing the body is what unblocks a read that never returns.
 			data, err := readRequestBody(origCtx, origReq.Body)
 			// Close body immediately after read, regardless if there was an error or not
-			origReq.Body.Close()
+			_ = origReq.Body.Close()
 			if err != nil {
 				if ctxErr := origCtx.Err(); ctxErr != nil {
 					return nil, ctxErr
@@ -341,7 +340,9 @@ func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error
 
 		if bodySeeker != nil {
 			// Rewind the body to the start on retry
-			bodySeeker.Seek(0, io.SeekStart)
+			if _, err := bodySeeker.Seek(0, io.SeekStart); err != nil {
+				return nil, fmt.Errorf("while rewinding request body: %w", err)
+			}
 		}
 	}
 }
@@ -355,7 +356,7 @@ func readRequestBody(ctx context.Context, body io.ReadCloser) ([]byte, error) {
 	go func() {
 		select {
 		case <-ctx.Done():
-			body.Close()
+			_ = body.Close()
 		case <-done:
 		}
 	}()
@@ -448,7 +449,7 @@ func saveDiscardedResponse(resp *http.Response) {
 	}
 
 	saved, err := io.ReadAll(io.LimitReader(resp.Body, discardedBodyLimit+1))
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if err == nil && len(saved) <= discardedBodyLimit {
 		resp.Body = io.NopCloser(bytes.NewReader(saved))
@@ -485,11 +486,11 @@ func parseRetryAfterHeader(resp *http.Response) time.Duration {
 	if val != "" {
 		if secs, err := strconv.Atoi(val); err == nil {
 			return time.Duration(secs) * time.Second
-		} else if t, err := http.ParseTime(val); err == nil {
-			return time.Until(t)
-		} else {
-			log.Printf("nicehttp: unexpected formatting of Retry-After value %q", val)
 		}
+		if t, err := http.ParseTime(val); err == nil {
+			return time.Until(t)
+		}
+		log.Printf("nicehttp: unexpected formatting of Retry-After value %q", val)
 	}
 	return 0
 }
