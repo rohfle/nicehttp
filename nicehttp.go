@@ -89,7 +89,9 @@ var (
 // discardedBodyLimit is the maximum number of bytes read from the response body
 // of a request attempt that is going to be retried. Draining the body allows
 // the downstream roundtripper to reuse the connection; a body larger than this
-// limit is closed early and its connection is dropped instead.
+// limit is closed early and its connection is dropped instead. A body that fits
+// is kept, so the response can still be returned when the retry cannot start
+// before the caller's deadline.
 const discardedBodyLimit = 4096
 
 type readSeekCloser struct {
@@ -243,7 +245,11 @@ func replayable(req *http.Request) bool {
 // A response that arrives after the caller's context is done is returned as is,
 // rather than retried, and the cancellation surfaces when its body is read. A
 // retry whose backoff wait cannot start before the caller's deadline is not
-// attempted; the last response is returned instead.
+// attempted; the last response is returned instead, with its body only when it
+// fits in a small retained buffer. Only a deadline on the request context is
+// visible here: http.Client.Timeout is a timer outside the context, so the
+// retry cutoff does not apply and a request bounded only by it runs until the
+// timer fires and fails with the client's timeout error.
 func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error) {
 	if rt.limiter == nil {
 		// A transport without a limiter cannot back off between attempts
@@ -280,7 +286,6 @@ func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error
 			// No retry can occur, so send the body as is instead of reading it
 			// into memory for nothing. The downstream roundtripper owns and
 			// closes it, as it does for any other request.
-			log.Printf("nicehttp: request body is not buffered because maxAttempts is 1, so the request cannot be retried")
 		} else {
 			// The body is not seekable, so read it fully into memory to be
 			// able to replay it. The read is bounded by the caller context:
@@ -301,15 +306,38 @@ func (rt *NiceTransport) RoundTrip(origReq *http.Request) (*http.Response, error
 		}
 	}
 
+	// saved is the last retryable response, with its body already drained into
+	// memory. It is handed back when the next attempt cannot start before the
+	// deadline, rather than discarding the server's answer.
+	var saved *http.Response
 	attempt := 0
 	for {
+		// Wait patiently for the limiter before sending the request up to the
+		// context deadline
+		if err := rt.limiter.Wait(origCtx); err != nil {
+			if origCtx.Err() != nil {
+				// The original context is cancelled or has exceeded deadline
+				return nil, err
+			}
+			if saved != nil {
+				// The retry cannot start in time, so return what the server
+				// said instead of a deadline error
+				return saved, nil
+			}
+			// Waiting for the next attempt would run past the deadline, which
+			// the limiter rejects up front instead of sleeping. The caller's
+			// context is still live, so say why this is not a real expiry.
+			return nil, fmt.Errorf("nicehttp: next attempt does not fit before the request deadline: %w", err)
+		}
+
 		// This loop will run up to maxAttempts times
 		attempt++
 
-		resp, final, err := rt.roundTripAttempt(origCtx, origReq, attemptTimeout, attempt >= maxAttempts)
-		if final {
+		resp, retry, err := rt.roundTripAttempt(origCtx, origReq, attemptTimeout, attempt >= maxAttempts)
+		if !retry {
 			return resp, err
 		}
+		saved = resp
 
 		if bodySeeker != nil {
 			// Rewind the body to the start on retry
@@ -348,21 +376,10 @@ func newAttemptContext(parent context.Context, timeout time.Duration) (context.C
 	return context.WithTimeout(parent, timeout)
 }
 
-// roundTripAttempt executes a single request attempt under the rate limiter,
-// returning whether the response is final or eligible for a retry.
-func (rt *NiceTransport) roundTripAttempt(origCtx context.Context, origReq *http.Request, attemptTimeout time.Duration, lastAttempt bool) (resp *http.Response, final bool, err error) {
-	// Wait patiently for the limiter before sending the request up to the context deadline
-	if err := rt.limiter.Wait(origCtx); err != nil {
-		if origCtx.Err() != nil {
-			// The original context is cancelled or has exceeded deadline
-			return nil, true, err
-		}
-		// Waiting for the next attempt would run past the deadline, which the
-		// limiter rejects up front instead of sleeping. The caller's context
-		// is still live, so say why this is not a real context expiry.
-		return nil, true, fmt.Errorf("nicehttp: next attempt does not fit before the request deadline: %w", err)
-	}
-
+// roundTripAttempt executes a single request attempt, returning whether the
+// response is eligible for a retry. The caller must hold the limiter, having
+// acquired it with Wait, and the deferred Done releases it.
+func (rt *NiceTransport) roundTripAttempt(origCtx context.Context, origReq *http.Request, attemptTimeout time.Duration, lastAttempt bool) (resp *http.Response, retry bool, err error) {
 	needsRetry := true
 	var retryAfter time.Duration
 
@@ -408,16 +425,56 @@ func (rt *NiceTransport) roundTripAttempt(origCtx context.Context, origReq *http
 			resp.Body = &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancelAttemptCtx}
 			cancelAttemptCtx = nil
 		}
-		return resp, true, err
+		return resp, false, err
 	}
 
-	// Drain and close the discarded body to allow connection reuse for retries
-	if resp != nil && resp.Body != nil {
-		io.Copy(io.Discard, io.LimitReader(resp.Body, discardedBodyLimit))
-		resp.Body.Close()
+	saveDiscardedResponse(resp)
+	return resp, true, err
+}
+
+// saveDiscardedResponse drains and closes the body of a response that is going
+// to be retried. Draining allows the downstream roundtripper to reuse the
+// connection. A body that fits in discardedBodyLimit is kept, so the response
+// can still be returned when the retry cannot start before the caller's
+// deadline. A larger or broken body is dropped instead of being returned
+// truncated.
+func saveDiscardedResponse(resp *http.Response) {
+	if resp == nil {
+		return
+	}
+	if resp.Body == nil {
+		dropResponseBody(resp)
+		return
 	}
 
-	return resp, false, err
+	saved, err := io.ReadAll(io.LimitReader(resp.Body, discardedBodyLimit+1))
+	resp.Body.Close()
+
+	if err == nil && len(saved) <= discardedBodyLimit {
+		resp.Body = io.NopCloser(bytes.NewReader(saved))
+		resp.ContentLength = int64(len(saved))
+		// The body is now an in-memory reader, not the original transfer
+		resp.TransferEncoding = nil
+		if resp.Header != nil && resp.Header.Get("Content-Length") != "" {
+			resp.Header.Set("Content-Length", strconv.Itoa(len(saved)))
+		}
+		return
+	}
+
+	dropResponseBody(resp)
+}
+
+// dropResponseBody replaces the body of a response that is kept as a fallback
+// with an empty one, and removes the content metadata that no longer matches.
+func dropResponseBody(resp *http.Response) {
+	resp.Body = http.NoBody
+	resp.ContentLength = 0
+	resp.TransferEncoding = nil
+	resp.Trailer = nil
+	if resp.Header != nil {
+		resp.Header.Del("Content-Length")
+		resp.Header.Del("Content-Encoding")
+	}
 }
 
 func parseRetryAfterHeader(resp *http.Response) time.Duration {

@@ -5,10 +5,10 @@ import (
 	"context"
 	"errors"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -438,6 +438,233 @@ func TestRoundTripperMaxAttemptsClamped(t *testing.T) {
 			}
 		})
 	}
+}
+
+// slowBody returns its data, then delays the final EOF so that draining it
+// takes time. That delay pushes the next wait past the deadline after the
+// retry has already been approved.
+type slowBody struct {
+	io.Reader
+	delay time.Duration
+	slept bool
+}
+
+func (b *slowBody) Read(p []byte) (int, error) {
+	n, err := b.Reader.Read(p)
+	if err == io.EOF && !b.slept {
+		b.slept = true
+		time.Sleep(b.delay)
+	}
+	return n, err
+}
+
+func (b *slowBody) Close() error {
+	return nil
+}
+
+// errorBody fails every read, like a connection dropped mid-body.
+type errorBody struct{}
+
+func (errorBody) Read([]byte) (int, error) {
+	return 0, errors.New("read failed")
+}
+
+func (errorBody) Close() error {
+	return nil
+}
+
+// TestRoundTripperReturnsSavedResponseWhenRetryCannotStart checks that the
+// response of a retried attempt is kept and handed back when the next wait no
+// longer fits before the deadline.
+func TestRoundTripperReturnsSavedResponseWhenRetryCannotStart(t *testing.T) {
+	const delay = 200 * time.Millisecond
+	bodyText := "Service Unavailable"
+
+	calls := 0
+	endpoint := &MockEndpoint{
+		CallCount: 0,
+		Start:     time.Time{},
+		Timings:   nil,
+		Deadline:  time.Time{},
+		Handler: func(_ *MockEndpoint, _ int, _ *http.Request) (*http.Response, error) {
+			calls++
+			return &http.Response{
+				StatusCode:    503,
+				Body:          &slowBody{Reader: strings.NewReader(bodyText), delay: delay},
+				Header:        http.Header{"Content-Length": {"12345"}},
+				ContentLength: 12345,
+			}, nil
+		},
+	}
+
+	// The 400ms wait is approved before the body is drained, because at that
+	// point it fits in the 500ms deadline. Draining takes 200ms, so the wait
+	// checked afterwards would end at 600ms and is refused.
+	settings := &NiceTransport{
+		limiter:     NewLimiter(NewBackoff(400*time.Millisecond, 400*time.Millisecond, DefaultBackoffCoefficients)),
+		maxAttempts: 3,
+	}
+	client := createClientWithEndpoint(settings, endpoint)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://example.com", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequestWithContext failed: %s", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("expected the saved 503 response, got error: %s", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 503 {
+		t.Fatalf("expected 503 response but got status %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("unexpected error while reading the response body: %s", err)
+	}
+	if string(data) != bodyText {
+		t.Fatalf("expected response body %q, got %q", bodyText, string(data))
+	}
+	if resp.ContentLength != int64(len(bodyText)) {
+		t.Errorf("expected ContentLength %d, got %d", len(bodyText), resp.ContentLength)
+	}
+	if got := resp.Header.Get("Content-Length"); got != strconv.Itoa(len(bodyText)) {
+		t.Errorf("expected Content-Length header %q, got %q", strconv.Itoa(len(bodyText)), got)
+	}
+	if calls != 1 {
+		t.Errorf("expected one attempt, got %d", calls)
+	}
+	if ctx.Err() != nil {
+		t.Errorf("expected the response before the deadline, got context error %v", ctx.Err())
+	}
+}
+
+// TestSaveDiscardedResponse checks that a retryable body is only retained when
+// it is complete, so a returned response is never silently truncated.
+func TestSaveDiscardedResponse(t *testing.T) {
+	t.Run("complete body is kept", func(t *testing.T) {
+		const bodyText = "Service Unavailable"
+		resp := &http.Response{
+			Body:             io.NopCloser(strings.NewReader(bodyText)),
+			Header:           http.Header{"Content-Length": {"12345"}},
+			ContentLength:    12345,
+			TransferEncoding: []string{"chunked"},
+			Trailer:          http.Header{"X-Trailer": {"value"}},
+		}
+
+		saveDiscardedResponse(resp)
+
+		data, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("unexpected error while reading the saved body: %s", err)
+		}
+		if string(data) != bodyText {
+			t.Errorf("expected saved body %q, got %q", bodyText, string(data))
+		}
+		if resp.ContentLength != int64(len(bodyText)) {
+			t.Errorf("expected ContentLength %d, got %d", len(bodyText), resp.ContentLength)
+		}
+		if got := resp.Header.Get("Content-Length"); got != strconv.Itoa(len(bodyText)) {
+			t.Errorf("expected Content-Length header %q, got %q", strconv.Itoa(len(bodyText)), got)
+		}
+		if resp.TransferEncoding != nil {
+			t.Errorf("expected TransferEncoding to be cleared, got %v", resp.TransferEncoding)
+		}
+		if got := resp.Trailer.Get("X-Trailer"); got != "value" {
+			t.Errorf("expected complete trailers to be kept, got %q", got)
+		}
+	})
+
+	t.Run("body above the limit is dropped", func(t *testing.T) {
+		resp := &http.Response{
+			Body:             io.NopCloser(strings.NewReader(strings.Repeat("a", discardedBodyLimit+1))),
+			Header:           http.Header{"Content-Length": {"5000"}, "Content-Encoding": {"gzip"}},
+			ContentLength:    5000,
+			TransferEncoding: []string{"chunked"},
+			Trailer:          http.Header{"X-Trailer": {"value"}},
+		}
+
+		saveDiscardedResponse(resp)
+
+		if resp.Body != http.NoBody {
+			t.Error("expected the oversized body to be dropped")
+		}
+		if resp.ContentLength != 0 {
+			t.Errorf("expected ContentLength 0, got %d", resp.ContentLength)
+		}
+		if resp.TransferEncoding != nil {
+			t.Errorf("expected TransferEncoding to be cleared, got %v", resp.TransferEncoding)
+		}
+		if resp.Trailer != nil {
+			t.Errorf("expected incomplete trailers to be cleared, got %v", resp.Trailer)
+		}
+		if got := resp.Header.Get("Content-Length"); got != "" {
+			t.Errorf("expected the Content-Length header to be removed, got %q", got)
+		}
+		if got := resp.Header.Get("Content-Encoding"); got != "" {
+			t.Errorf("expected the Content-Encoding header to be removed, got %q", got)
+		}
+	})
+
+	t.Run("body at the limit is kept", func(t *testing.T) {
+		bodyText := strings.Repeat("a", discardedBodyLimit)
+		resp := &http.Response{
+			Body:          io.NopCloser(strings.NewReader(bodyText)),
+			Header:        http.Header{},
+			ContentLength: int64(len(bodyText)),
+		}
+
+		saveDiscardedResponse(resp)
+
+		data, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("unexpected error while reading the saved body: %s", err)
+		}
+		if len(data) != discardedBodyLimit {
+			t.Errorf("expected the %d byte body to be kept, got %d bytes", discardedBodyLimit, len(data))
+		}
+	})
+
+	t.Run("read error drops the body", func(t *testing.T) {
+		resp := &http.Response{
+			Body:          errorBody{},
+			Header:        http.Header{"Content-Length": {"100"}},
+			ContentLength: 100,
+		}
+
+		saveDiscardedResponse(resp)
+
+		if resp.Body != http.NoBody {
+			t.Error("expected a body with a read error to be dropped")
+		}
+		if got := resp.Header.Get("Content-Length"); got != "" {
+			t.Errorf("expected the Content-Length header to be removed, got %q", got)
+		}
+	})
+
+	t.Run("nil body is given an empty one", func(t *testing.T) {
+		resp := &http.Response{
+			Header:        http.Header{"Content-Length": {"100"}},
+			ContentLength: 100,
+		}
+
+		saveDiscardedResponse(resp)
+
+		if resp.Body != http.NoBody {
+			t.Error("expected a nil body to become an empty body")
+		}
+		if resp.ContentLength != 0 {
+			t.Errorf("expected ContentLength 0, got %d", resp.ContentLength)
+		}
+		if got := resp.Header.Get("Content-Length"); got != "" {
+			t.Errorf("expected the Content-Length header to be removed, got %q", got)
+		}
+	})
 }
 
 func TestRoundTripperFourthRun(t *testing.T) {
@@ -894,8 +1121,7 @@ func TestRoundTripperRequestBodyReadBoundedByContext(t *testing.T) {
 }
 
 // TestRoundTripperSingleAttemptBodyPassthrough checks that with one attempt a
-// non-seekable body is sent as is, because there is nothing to replay, and
-// that the skipped buffering is reported.
+// non-seekable body is sent as is, because there is nothing to replay.
 func TestRoundTripperSingleAttemptBodyPassthrough(t *testing.T) {
 	body := &passthroughBody{Reader: strings.NewReader("hello")}
 	var received string
@@ -927,11 +1153,6 @@ func TestRoundTripperSingleAttemptBodyPassthrough(t *testing.T) {
 	}
 	client := createClientWithEndpoint(settings, endpoint)
 
-	var logs bytes.Buffer
-	previousOutput := log.Writer()
-	log.SetOutput(&logs)
-	defer log.SetOutput(previousOutput)
-
 	req, err := http.NewRequest(http.MethodPost, "http://example.com", body)
 	if err != nil {
 		t.Fatalf("http.NewRequest failed: %s", err)
@@ -947,9 +1168,6 @@ func TestRoundTripperSingleAttemptBodyPassthrough(t *testing.T) {
 	}
 	if received != "hello" {
 		t.Errorf("expected the request body %q, got %q", "hello", received)
-	}
-	if !strings.Contains(logs.String(), "not buffered") {
-		t.Errorf("expected a warning that the body was not buffered, got %q", logs.String())
 	}
 }
 

@@ -152,7 +152,9 @@ An attempt is retried up to `maxAttempts`, and a cancelled or expired caller con
 `DefaultAttemptTimeout` is `NoTimeout`, so do not rely on an implicit per-attempt deadline: bound requests with
 `http.Client.Timeout` or a context deadline, as the examples above do with 10 minutes. When the next backoff wait
 cannot start before the caller's deadline, the client stops retrying and returns the last response instead of
-waiting for the deadline to expire.
+waiting for the deadline to expire. That response keeps its body when it is at most 4 KB; a larger body is dropped
+rather than returned truncated. This early return needs a deadline on the request context: `http.Client.Timeout`
+is not visible to the transport, so a request bounded only by it is not cut short, and fails when the timeout fires.
 
 After an attempt timeout, a transport error or a `504 Gateway Timeout` the client cannot know whether the
 request reached the server, so only a request that is safe to replay is retried:
