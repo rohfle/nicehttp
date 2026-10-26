@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -462,6 +463,38 @@ func (b *slowBody) Close() error {
 	return nil
 }
 
+// slowLargeBody returns more than the retained body limit and delays its
+// second read, so draining an oversized body takes measurable time.
+type slowLargeBody struct {
+	remaining int
+	delay     time.Duration
+	reads     int
+}
+
+func (b *slowLargeBody) Read(p []byte) (int, error) {
+	if b.reads == 1 {
+		time.Sleep(b.delay)
+	}
+	b.reads++
+
+	if b.remaining == 0 {
+		return 0, io.EOF
+	}
+	n := len(p)
+	if n > b.remaining {
+		n = b.remaining
+	}
+	for i := range p[:n] {
+		p[i] = 'a'
+	}
+	b.remaining -= n
+	return n, nil
+}
+
+func (b *slowLargeBody) Close() error {
+	return nil
+}
+
 // errorBody fails every read, like a connection dropped mid-body.
 type errorBody struct{}
 
@@ -535,6 +568,168 @@ func TestRoundTripperReturnsSavedResponseWhenRetryCannotStart(t *testing.T) {
 	}
 	if got := resp.Header.Get("Content-Length"); got != strconv.Itoa(len(bodyText)) {
 		t.Errorf("expected Content-Length header %q, got %q", strconv.Itoa(len(bodyText)), got)
+	}
+	if calls != 1 {
+		t.Errorf("expected one attempt, got %d", calls)
+	}
+	if ctx.Err() != nil {
+		t.Errorf("expected the response before the deadline, got context error %v", ctx.Err())
+	}
+}
+
+// TestRoundTripperKeepsSavedResponseAfterTransportError checks that a
+// retryable transport error does not discard the earlier 503 when the next
+// wait no longer fits. A second request is queued behind attempt 2 so the
+// limiter schedule advances between the preview and the next wait.
+func TestRoundTripperKeepsSavedResponseAfterTransportError(t *testing.T) {
+	const (
+		backoffWait  = 200 * time.Millisecond
+		handlerPause = 50 * time.Millisecond
+		deadline     = 550 * time.Millisecond
+	)
+
+	startSecond := make(chan struct{})
+	secondDone := make(chan error, 1)
+
+	endpoint := &MockEndpoint{
+		CallCount: 0,
+		Start:     time.Time{},
+		Timings:   nil,
+		Deadline:  time.Time{},
+		Handler: func(_ *MockEndpoint, callCount int, _ *http.Request) (*http.Response, error) {
+			switch callCount {
+			case 1:
+				return &http.Response{
+					StatusCode: 503,
+					Body:       io.NopCloser(strings.NewReader("Service Unavailable")),
+					Header:     make(http.Header),
+				}, nil
+			case 2:
+				// Queue the second request while this attempt still holds the
+				// limiter, so it runs before the next wait.
+				close(startSecond)
+				time.Sleep(handlerPause)
+				return nil, errors.New("simulated transport error")
+			default:
+				return &http.Response{
+					StatusCode: 200,
+					Body:       io.NopCloser(strings.NewReader("OK")),
+					Header:     make(http.Header),
+				}, nil
+			}
+		},
+	}
+
+	settings := &NiceTransport{
+		limiter:     NewLimiter(NewBackoff(backoffWait, backoffWait, DefaultBackoffCoefficients)),
+		maxAttempts: 3,
+	}
+	client := createClientWithEndpoint(settings, endpoint)
+
+	go func() {
+		<-startSecond
+		resp, err := client.Get("http://example.com/second")
+		if err != nil {
+			secondDone <- err
+			return
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		secondDone <- nil
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://example.com", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequestWithContext failed: %s", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("expected the saved 503 response, got error: %s", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 503 {
+		t.Fatalf("expected 503 response but got status %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("unexpected error while reading the response body: %s", err)
+	}
+	if string(data) != "Service Unavailable" {
+		t.Fatalf("expected the saved body %q, got %q", "Service Unavailable", string(data))
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second request failed: %s", err)
+	}
+	if endpoint.CallCount != 3 {
+		t.Errorf("expected 3 calls, got %d", endpoint.CallCount)
+	}
+}
+
+// TestRoundTripperSavedResponseDropsOversizedBody checks the end-to-end
+// fallback for a body above the retention limit: status survives, body and
+// content metadata do not.
+func TestRoundTripperSavedResponseDropsOversizedBody(t *testing.T) {
+	calls := 0
+	endpoint := &MockEndpoint{
+		CallCount: 0,
+		Start:     time.Time{},
+		Timings:   nil,
+		Deadline:  time.Time{},
+		Handler: func(_ *MockEndpoint, _ int, _ *http.Request) (*http.Response, error) {
+			calls++
+			return &http.Response{
+				StatusCode: 503,
+				Body: &slowLargeBody{
+					remaining: discardedBodyLimit + 500,
+					delay:     200 * time.Millisecond,
+				},
+				Header:        http.Header{"Content-Length": {"5000"}, "Content-Encoding": {"gzip"}},
+				ContentLength: 5000,
+			}, nil
+		},
+	}
+
+	// As in the small-body case, the 400ms wait is approved before the 200ms
+	// drain, then rejected once the drain has moved the schedule.
+	settings := &NiceTransport{
+		limiter:     NewLimiter(NewBackoff(400*time.Millisecond, 400*time.Millisecond, DefaultBackoffCoefficients)),
+		maxAttempts: 3,
+	}
+	client := createClientWithEndpoint(settings, endpoint)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://example.com", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequestWithContext failed: %s", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("expected the saved 503 response, got error: %s", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 503 {
+		t.Fatalf("expected 503 response but got status %d", resp.StatusCode)
+	}
+	if resp.Body != http.NoBody {
+		t.Error("expected the oversized body to be dropped")
+	}
+	if resp.ContentLength != 0 {
+		t.Errorf("expected ContentLength 0, got %d", resp.ContentLength)
+	}
+	if got := resp.Header.Get("Content-Length"); got != "" {
+		t.Errorf("expected the Content-Length header to be removed, got %q", got)
+	}
+	if got := resp.Header.Get("Content-Encoding"); got != "" {
+		t.Errorf("expected the Content-Encoding header to be removed, got %q", got)
 	}
 	if calls != 1 {
 		t.Errorf("expected one attempt, got %d", calls)
@@ -663,6 +858,40 @@ func TestSaveDiscardedResponse(t *testing.T) {
 		}
 		if got := resp.Header.Get("Content-Length"); got != "" {
 			t.Errorf("expected the Content-Length header to be removed, got %q", got)
+		}
+	})
+}
+
+func TestParseRetryAfterHeader(t *testing.T) {
+	if got := parseRetryAfterHeader(nil); got != 0 {
+		t.Errorf("expected 0 for a nil response, got %s", got)
+	}
+
+	tests := []struct {
+		name  string
+		value string
+		want  time.Duration
+	}{
+		{name: "empty", value: "", want: 0},
+		{name: "seconds", value: "120", want: 120 * time.Second},
+		{name: "negative seconds", value: "-5", want: -5 * time.Second},
+		{name: "huge seconds", value: "100000000", want: 100000000 * time.Second},
+		{name: "malformed", value: "soon", want: 0},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			resp := &http.Response{Header: http.Header{"Retry-After": {test.value}}}
+			if got := parseRetryAfterHeader(resp); got != test.want {
+				t.Errorf("expected %s, got %s", test.want, got)
+			}
+		})
+	}
+
+	t.Run("past date", func(t *testing.T) {
+		past := time.Now().Add(-2 * time.Hour).UTC().Format(http.TimeFormat)
+		resp := &http.Response{Header: http.Header{"Retry-After": {past}}}
+		if got := parseRetryAfterHeader(resp); got > -time.Hour {
+			t.Errorf("expected a negative wait for a past date, got %s", got)
 		}
 	})
 }
@@ -1243,6 +1472,9 @@ func TestRoundTripDoesNotMutateCallerBody(t *testing.T) {
 			if err != nil {
 				t.Fatalf("http.NewRequest failed: %s", err)
 			}
+			method := req.Method
+			urlBefore := req.URL.String()
+			headerBefore := req.Header.Clone()
 
 			resp, err := client.Do(req)
 			if err != nil {
@@ -1252,6 +1484,15 @@ func TestRoundTripDoesNotMutateCallerBody(t *testing.T) {
 
 			if req.Body != body {
 				t.Error("expected the caller's request body to be unchanged")
+			}
+			if req.Method != method {
+				t.Errorf("expected method %q, got %q", method, req.Method)
+			}
+			if got := req.URL.String(); got != urlBefore {
+				t.Errorf("expected URL %q, got %q", urlBefore, got)
+			}
+			if !reflect.DeepEqual(req.Header, headerBefore) {
+				t.Errorf("expected headers to be unchanged, got %v", req.Header)
 			}
 			if calls != 2 {
 				t.Errorf("expected 2 attempts, got %d", calls)
@@ -1460,6 +1701,77 @@ func TestRoundTripperRewindError(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("expected one attempt, got %d", calls)
+	}
+}
+
+// TestRedirectReplaysSeekableBody checks that wrapping a seekable body for
+// attempts does not break http.Client's use of GetBody on a 307 redirect.
+func TestRedirectReplaysSeekableBody(t *testing.T) {
+	var mutex sync.Mutex
+	var bodies []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		mutex.Lock()
+		bodies = append(bodies, string(data))
+		mutex.Unlock()
+
+		if r.URL.Path == "/first" {
+			w.Header().Set("Location", "/second")
+			w.WriteHeader(http.StatusTemporaryRedirect)
+			return
+		}
+		_, _ = io.WriteString(w, "done")
+	}))
+	defer server.Close()
+
+	client := &http.Client{
+		Transport: NewNiceTransportBuilder().
+			SetMaxAttempts(1).
+			SetLimiterBackoff(NewBackoff(time.Millisecond, time.Millisecond, DefaultBackoffCoefficients)).
+			Build(),
+	}
+
+	payload := []byte("payload")
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/first", newReadSeekCloser(payload))
+	if err != nil {
+		t.Fatalf("http.NewRequest failed: %s", err)
+	}
+	req.ContentLength = int64(len(payload))
+	req.GetBody = func() (io.ReadCloser, error) {
+		return newReadSeekCloser(payload), nil
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("redirect failed: %s", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200 response but got status %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("unexpected error while reading the response body: %s", err)
+	}
+	if string(data) != "done" {
+		t.Errorf("expected response body %q, got %q", "done", string(data))
+	}
+
+	mutex.Lock()
+	defer mutex.Unlock()
+	if len(bodies) != 2 {
+		t.Fatalf("expected two requests with bodies, got %d", len(bodies))
+	}
+	for i, body := range bodies {
+		if body != "payload" {
+			t.Errorf("request %d: expected body %q, got %q", i, "payload", body)
+		}
 	}
 }
 

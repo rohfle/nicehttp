@@ -162,3 +162,33 @@ func TestFloatFromValue(t *testing.T) {
 		})
 	}
 }
+
+// TestBackoffRetryAfterClamps checks that negative and past-date Retry-After
+// values fall back to MinWait, and a huge value is capped.
+func TestBackoffRetryAfterClamps(t *testing.T) {
+	const (
+		minWait = time.Second
+		maxWait = time.Minute
+	)
+	tests := []struct {
+		name string
+		wait time.Duration
+		want time.Duration
+	}{
+		{name: "negative", wait: -5 * time.Second, want: minWait},
+		{name: "past date", wait: time.Until(time.Now().Add(-2 * time.Hour)), want: minWait},
+		{name: "huge", wait: 100000 * time.Hour, want: maxRetryAfterWait},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			backoff := NewBackoff(minWait, maxWait, DefaultBackoffCoefficients)
+			if got := backoff.Update(true, test.wait); got != test.want {
+				t.Errorf("Update: expected %s, got %s", test.want, got)
+			}
+			preview := NewBackoff(minWait, maxWait, DefaultBackoffCoefficients)
+			if got := preview.previewWait(true, test.wait); got != test.want {
+				t.Errorf("previewWait: expected %s, got %s", test.want, got)
+			}
+		})
+	}
+}
