@@ -77,7 +77,7 @@ var (
 	// or a per host config does not set one. The default is NoTimeout, which
 	// disables the per attempt deadline; requests are then bounded only by the
 	// caller's context or the http.Client timeout.
-	DefaultAttemptTimeout time.Duration = NoTimeout
+	DefaultAttemptTimeout = NoTimeout
 
 	// DefaultMaxAttempts is the maximum number of attempts per request,
 	// including the first, when the builder or a per host config does not set
